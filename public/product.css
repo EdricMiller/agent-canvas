@@ -1,0 +1,33 @@
+.product-panel{flex-shrink:0;margin:0 0 16px;padding:13px;border:1px solid #e8e0ef;border-radius:10px;background:#fcfaff;font-size:11px}
+.product-heading{display:flex;align-items:center;gap:10px;line-height:1.7}
+.product-heading img{width:43px;height:43px;border-radius:6px;object-fit:cover;background:#f0edf4}
+.product-heading strong,.product-heading small{display:block}
+.product-heading strong{font-weight:550;color:#655172}
+.product-heading small{font-size:10px;color:#94869d}
+.campaign-preview{margin-top:13px;padding:10px 11px;border-radius:7px;background:#f2edf8;line-height:1.6;overflow-wrap:anywhere}
+.campaign-preview small{display:block;color:#95849f;font-size:9px}
+.campaign-preview strong{display:block;margin-top:3px;font-size:13px;color:#655172;font-weight:550}
+.campaign-preview p{margin:3px 0 0;color:#91809b;font-size:10px}
+.product-facts{margin-top:10px;color:#82718e;line-height:1.8;max-height:180px;overflow:auto;overflow-wrap:anywhere}
+.product-facts summary,.task-details summary{cursor:pointer}
+.product-facts ul{margin:8px 0 0;padding-left:17px}
+.product-facts li span{font-size:9px;margin-right:6px;padding:2px 4px;border-radius:3px;background:#eee7f5;color:#8e709f}
+.canvas-actions{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.task-details{margin-top:12px;padding-top:10px;border-top:1px solid #eee8f4;color:#9887a3;font-size:10px;overflow-wrap:anywhere;line-height:1.8}
+.task-body{padding:2px 8px;color:#8c7c98}
+.task-body p{margin:8px 0}
+.usage-table{width:100%;border-collapse:collapse;text-align:left;font-size:9px}
+.usage-table th,.usage-table td{padding:5px 4px;border-bottom:1px solid #eee8f4;font-weight:400}
+.compare-dialog{width:min(1100px,calc(100% - 32px))}
+.comparison-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:16px}
+.comparison-grid figure{margin:0;min-width:0}
+.comparison-grid img{display:block;width:100%;height:min(57dvh,530px);object-fit:contain;border:1px solid #eee8f4;border-radius:8px;background:#f8f6fa}
+.comparison-grid figcaption{padding:10px 2px;color:#91829b;font-size:12px}
+@media(max-width:760px){
+ .product-panel{margin-bottom:14px}
+ .canvas-actions{gap:8px}
+ .canvas-actions button{font-size:10px}
+ .canvas-title strong{max-width:100px}
+ .comparison-grid{grid-template-columns:1fr;gap:8px}
+ .comparison-grid img{height:45dvh}
+}

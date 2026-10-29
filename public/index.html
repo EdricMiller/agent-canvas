@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f7f7f5"><title>画语 Canvas · 让想法成为画面</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/product.css"><link rel="stylesheet" href="/debug.css"><link rel="icon" href="/favicon.svg" type="image/svg+xml"></head>
+<body>
+<div class="app-shell">
+  <aside class="rail" aria-label="主导航">
+    <a class="brand-mark" href="/" aria-label="画语首页">✳</a>
+    <button class="rail-button active" id="workspaceNav" title="创作空间" aria-label="创作空间"></button>
+    <button class="rail-button" id="sessionsNav" title="历史会话" aria-label="历史会话"></button>
+    <button class="rail-button" id="skillsNav" title="技能库" aria-label="技能库"></button>
+    <div class="rail-spacer"></div>
+    <button class="rail-button" id="debugNav" title="模型调试" aria-label="模型调试"></button>
+    <button class="rail-button" id="settingsNav" title="连接状态" aria-label="连接状态"></button>
+    <div class="avatar" title="本地创作空间">你</div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <div class="brand"><span>画语</span><span class="brand-en">Canvas</span><span class="top-divider"></span><span class="workspace-label">个人创作空间</span></div>
+      <div class="top-actions"><span class="connection" id="connection">连接中</span><button class="button subtle" id="debugButton" title="模型调试" aria-label="模型调试面板"></button><button class="button subtle" id="newSession"></button><button class="button dark" id="exportButton" disabled></button></div>
+    </header>
+    <main>
+      <section class="chat-panel" aria-label="对话创作">
+        <div class="chat-heading"><div><span class="eyebrow">YOUR CREATIVE PARTNER</span><h1>从一个想法开始<span class="heading-spark">✧</span></h1></div><button class="icon-button" id="sessionMenu" aria-label="打开历史会话"></button></div>
+        <button class="skill-selector" id="skillSelector"><span class="skill-icon" id="selectedSkillIcon">✧</span><span class="skill-label"><small>当前创作技能</small><strong id="selectedSkillName">加载中</strong></span><span class="skill-switch">切换</span><span id="skillChevron"></span></button>
+        <div class="product-panel" id="productPanel" hidden></div>
+        <div class="messages" id="messages" aria-live="polite"></div>
+        <div class="composer-area">
+          <div id="selectedContext" class="selected-context" hidden></div>
+          <form id="composer" class="composer">
+            <textarea id="prompt" aria-label="描述你的创作想法" placeholder="描述你的想法，或告诉我如何调整图片…" rows="3" maxlength="12000"></textarea>
+            <div class="composer-footer"><div class="composer-options"><button type="button" id="attachButton" class="icon-button" title="上传参考图片" aria-label="上传参考图片"></button><span class="composer-separator"></span><span class="size-auto-label">AI 自动构图</span></div><button type="submit" id="sendButton" class="send-button" aria-label="发送消息"></button><button type="button" id="stopButton" class="stop-button" hidden>停止</button></div>
+          </form>
+          <p class="composer-hint" id="composerHint">Enter 发送 · Shift + Enter 换行</p>
+        </div>
+      </section>
+      <section class="canvas-panel" aria-label="图片画布">
+        <div class="canvas-toolbar"><div class="canvas-title"><span id="canvasIcon"></span><strong id="projectTitle">未命名创作</strong><span id="saveStatus" class="saved">已保存</span></div><div class="canvas-actions"><button class="button outlined small" id="compareButton" hidden>原图对照</button></div></div>
+        <div class="canvas-surface" id="canvasSurface">
+          <div class="canvas-top-label"><span class="live-dot"></span>自由画布<span class="canvas-shortcut">拖入图片即可开始</span></div>
+          <div class="empty-canvas" id="emptyCanvas">
+            <div class="abstract-art" aria-hidden="true"><div class="art-card back"><span class="art-orbit"></span></div><div class="art-card front"><div class="art-sun"></div><div class="art-hill hill-one"></div><div class="art-hill hill-two"></div><div class="art-caption">a little imagination.</div></div><span class="art-star star-one">✳</span><span class="art-star star-two">✧</span></div>
+            <h2>让想象，有画面。</h2><p>在左侧描述你的想法，剩下的交给创作助手。<br>也可以上传一张图片，开始新的变化。</p><button class="button outlined" id="uploadButton"></button><span class="upload-caption">PNG、JPG、WebP · 最大 10 MB</span>
+          </div>
+          <div class="image-stage" id="imageStage" hidden><div class="artboard" id="artboard"><img id="canvasImage" alt="当前选中的创作图片" draggable="false"></div></div>
+          <div class="canvas-image-meta" id="imageMeta" hidden></div>
+          <div class="canvas-bottom"><span id="canvasStatus">每一次灵感，都值得保留。</span><div class="zoom-controls"><button id="zoomOut" aria-label="缩小">−</button><button id="zoomReset" title="适应画布">适应</button><button id="zoomIn" aria-label="放大">+</button></div></div>
+          <div class="drop-overlay" id="dropOverlay" hidden>松开图片，开始创作</div>
+        </div>
+        <div class="version-panel"><div class="version-heading"><span>版本记录 <span id="versionCount">0</span></span><small>每次修改，都是新的可能</small></div><div class="versions" id="versions"><div class="version-empty">生成的图片会保存在这里，随时回到任何一个版本。</div></div></div>
+      </section>
+    </main>
+  </div>
+</div>
+<dialog id="skillsDialog"><div class="dialog-heading"><div><span class="eyebrow">CREATIVE SKILLS</span><h2>选择你的创作技能</h2></div><button class="icon-button close-dialog" aria-label="关闭">×</button></div><p class="dialog-description">给助手一个创作方向，它会读取技能、自主安排步骤并使用工具完成任务。</p><div class="skill-list" id="skillList"></div><div class="dialog-footer"><span>导入本地 SKILL.md，或从 GitHub 仓库导入公开 Skills。</span><div class="skill-import-actions"><button class="button outlined" id="importSkill">本地文件</button><input id="skillUrl" class="skill-url" placeholder="https://github.com/org/skills" aria-label="GitHub Skill 仓库地址"><button class="button dark" id="importSkillUrl">从 GitHub 导入</button></div></div></dialog>
+<dialog id="sessionsDialog"><div class="dialog-heading"><div><span class="eyebrow">YOUR WORKSPACE</span><h2>继续你的创作</h2></div><button class="icon-button close-dialog" aria-label="关闭">×</button></div><div class="session-list" id="sessionList"></div></dialog>
+<dialog id="settingsDialog"><div class="dialog-heading"><div><span class="eyebrow">CONNECTION</span><h2>创作引擎</h2></div><button class="icon-button close-dialog" aria-label="关闭">×</button></div><div id="settingsContent"></div></dialog>
+<dialog id="debugDialog" class="debug-dialog" aria-labelledby="debugTitle"><div class="dialog-heading"><div><span class="eyebrow">MODEL STUDIO</span><h2 id="debugTitle">模型调试</h2></div><button class="icon-button close-dialog" aria-label="关闭">×</button></div><p class="dialog-description">独立选择对话与生图的中转站和模型，也可以接入新的服务。</p><div class="debug-tabs" role="tablist" aria-label="调试设置"><button id="debugRoutesTab" role="tab" aria-controls="debugRoutes" aria-selected="true" data-debug-tab="routes">调用路由</button><button id="debugProvidersTab" role="tab" aria-controls="debugProviders" aria-selected="false" tabindex="-1" data-debug-tab="providers">中转站</button><button id="debugModelsTab" role="tab" aria-controls="debugModels" aria-selected="false" tabindex="-1" data-debug-tab="models">模型库</button></div><p id="debugNotice" class="debug-notice" role="status" hidden></p><p id="debugError" class="debug-error" role="alert" hidden></p><div id="debugContent"></div></dialog>
+<dialog id="compareDialog" class="compare-dialog"><div class="dialog-heading"><div><span class="eyebrow">PRODUCT COMPARISON</span><h2>原图与成品对照</h2></div><button class="icon-button close-dialog" aria-label="关闭">×</button></div><div class="comparison-grid"><figure><img id="compareOriginal" alt="商品原图"><figcaption id="compareOriginalLabel"></figcaption></figure><figure><img id="compareResult" alt="待核对的商品成品"><figcaption id="compareResultLabel"></figcaption></figure></div></dialog>
+
+<input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp" hidden><input type="file" id="skillInput" accept=".md,text/markdown" hidden><div id="toast" role="status" hidden></div>
+<script type="module" src="/app.js"></script>
+</body></html>

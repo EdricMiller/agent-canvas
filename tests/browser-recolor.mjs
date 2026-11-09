@@ -1,0 +1,51 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import sharp from 'sharp';
+import {chromium} from '@playwright/test';
+import {PDFDocument,PDFName,PDFRawStream,decodePDFRawStream} from 'pdf-lib';
+import {createWebApp} from '../server/web.js';
+import {mockDesignRuntime} from './helpers/design-agent.mjs';
+import {recolorImage} from '../server/image-colors.js';
+
+const root=path.resolve(import.meta.dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'canvas-recolor-ui-')),out=path.join(root,'test-results/recolor');
+fs.mkdirSync(out,{recursive:true});
+const image=(width,height)=>sharp(Buffer.from(`<svg width="${width}" height="${height}" viewBox="0 0 80 100"><path fill="#f5ebd9" d="M0 0H80V100H0z"/><path fill="#a0141e" d="M40 0H80V100H40z"/><path fill="#241a14" d="M8 10H72V30H8z"/><path fill="#a0141e" d="M16 60H64V90H16z"/></svg>`)).png().toBuffer();
+const working=await image(160,200),native=await image(320,400),photo=await image(80,100);
+const regions=[{seeds:[{x:.95,y:.05}],color:'#f5ebd9',tolerance:0}],protect=[[{x:.2,y:.6},{x:.8,y:.6},{x:.8,y:.9},{x:.2,y:.9}]];
+let source;
+const mock=mockDesignRuntime((_body,index)=>index===0?{name:'recolor_image',arguments:{sourceId:source.id,label:'原布局·只换背景',regions,protect}}:'已完成局部换色，其他区域保持原样。');
+mock.runtime.imageAdapter={edit:()=>assert.fail('no image model during local recoloring'),generate:()=>assert.fail('no image model during local recoloring')};
+const instance=await createWebApp({root:process.env.CANVAS_TEST_BUILD_ROOT||root,dataDir:temp,demo:false,apiKey:'fixture-only',agentModel:'test',imageModel:'test',maxImages:1,maxTurns:5,sandboxMode:'off'},{runtime:mock.runtime});
+const session=instance.store.create(),original=instance.store.addImage(session,photo,{kind:'upload',demo:false,width:80,height:100},{reference:false});
+source=instance.store.addImage(session,working,{kind:'generated',demo:false,parentId:original.id,productSourceId:original.id,width:160,height:200,label:'保留布局的原海报',imageTarget:{mode:'pixels',width:160,height:200,fit:'contain',background:'#f5ebd9'},adaptation:{method:'resize',sourceWidth:320,sourceHeight:400,upscaled:false,background:'#f5ebd9'}},{originalBytes:native});
+session.imageTarget=source.imageTarget;instance.store.save(session);
+const server=await new Promise((resolve,reject)=>{const s=instance.app.listen(0,'127.0.0.1');s.once('listening',()=>resolve(s));s.once('error',reject);});
+let browser;
+try{
+  browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH}:{})});
+  const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(`http://127.0.0.1:${server.address().port}/?session=${session.id}`);await page.locator('#canvasImage').waitFor();
+  await page.locator('#prompt').fill('只把右侧背景换成暖米白，保留商品、文字和整体排版。');await page.locator('#sendButton').click();
+  await page.locator('#localColorEditDetails').waitFor();
+  await page.waitForFunction(()=>!document.getElementById('stopButton'));
+  const result=session.versions.at(-1),expected=await recolorImage(working,regions,{protect});
+  assert.equal(result.parentId,source.id);assert.equal(result.renderSourceId,source.id);assert.equal(result.generation,undefined);assert.equal(session.job.imageCalls,0);assert.equal(session.job.colorEdits,1);assert.equal(session.versions.length,3);
+  assert.deepEqual(instance.store.image(session,source.id).bytes,working);assert.deepEqual(instance.store.image(session,source.id,{original:true}).bytes,native);
+  assert.equal(await page.locator('#canvasImage').getAttribute('src'),result.url);assert.match(await page.locator('#localColorEditDetails').innerText(),/原尺寸与布局保留/);
+  await page.screenshot({path:path.join(out,'workspace-desktop.png'),fullPage:true});
+  await page.locator('#exportButton').click();const downloading=page.waitForEvent('download');await page.locator('#downloadSubmit').click();
+  const png=path.join(out,'local-background.png');await(await downloading).saveAs(png);
+  assert.deepEqual(await sharp(png).ensureAlpha().raw().toBuffer(),await sharp(expected.bytes).ensureAlpha().raw().toBuffer());
+  await page.locator('#printPreset').click();assert.match(await page.locator('#printSizeHint').innerText(),/320 × 400 px/);
+  const pdfDownload=page.waitForEvent('download');await page.locator('#downloadSubmit').click();const pdfFile=path.join(out,'local-background.pdf');await(await pdfDownload).saveAs(pdfFile);
+  const pdf=await PDFDocument.load(fs.readFileSync(pdfFile)),stream=pdf.context.enumerateIndirectObjects().map(([,o])=>o).find(o=>o instanceof PDFRawStream&&o.dict.get(PDFName.of('Subtype'))?.toString()==='/Image'&&o.dict.get(PDFName.of('ColorSpace'))?.toString()==='/DeviceRGB');
+  assert.equal(stream.dict.get(PDFName.of('Width')).asNumber(),320);assert.equal(stream.dict.get(PDFName.of('Height')).asNumber(),400);
+  const nativeExpected=await recolorImage(native,regions,{protect});assert.deepEqual(Buffer.from(decodePDFRawStream(stream).decode()),await sharp(nativeExpected.bytes).removeAlpha().raw().toBuffer());
+  await page.getByRole('button',{name:'关闭',exact:true}).click();await page.setViewportSize({width:390,height:844});await page.locator('#localColorEditDetails').scrollIntoViewIfNeeded();
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:path.join(out,'workspace-mobile.png'),fullPage:true});
+  await page.reload();await page.locator('#localColorEditDetails').waitFor();assert.equal(await page.locator('#canvasImage').getAttribute('src'),result.url);
+  assert.deepEqual(errors,[]);console.log('PASS: chat → local color selection → preserved product, dimensions, history and native source → exact PNG/300PPI PDF downloads → desktop/mobile and reload; zero image-model calls.');
+}catch(error){await browser?.contexts()[0]?.pages()[0]?.screenshot({path:path.join(out,'failure.png'),fullPage:true}).catch(()=>{});console.error(error);process.exitCode=1;}
+finally{await browser?.close();await instance.shutdown();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));fs.rmSync(temp,{recursive:true,force:true});}

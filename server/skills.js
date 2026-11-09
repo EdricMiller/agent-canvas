@@ -33,7 +33,7 @@ function parseSkill(text, id, dir) {
   const unknownConnectors = connectors.filter(connector => !Object.hasOwn(connectorRegistry, connector));
   if (unknownConnectors.length) unsupportedReasons.push(`未注册连接器：${unknownConnectors.join('、')}`);
   const unsupported = unsupportedReasons.length > 0;
-  return { id, name: meta.name.slice(0,80), description: meta.description.slice(0,300), icon: meta.icon || 'sparkles', color: meta.color || 'violet', workflow: meta.metadata?.workflow === 'product-promotion' ? 'product-promotion' : null, body: match[2], version: createHash('sha256').update(text).digest('hex').slice(0,12), files, dir, allowedTools, requires, connectors, canRunScripts, unsupported, unsupportedReason: unsupportedReasons.join('；') };
+  return { id, name: meta.name.slice(0,80), description: meta.description.slice(0,300), icon: meta.icon || 'sparkles', color: meta.color || 'violet', workflow: ['product-promotion','logo-design'].includes(meta.metadata?.workflow) ? meta.metadata.workflow : null, body: match[2], version: createHash('sha256').update(text).digest('hex').slice(0,12), files, dir, allowedTools, requires, connectors, canRunScripts, unsupported, unsupportedReason: unsupportedReasons.join('；') };
 }
 export class Skills {
   constructor(roots, importDir) { this.roots = [...roots, importDir]; this.importDir = importDir; fs.mkdirSync(importDir, {recursive:true}); }

@@ -21,6 +21,9 @@ test('image prompts carry current direction and product facts without reintroduc
  assert.match(prompt,/无文案的运动配件/);assert.match(prompt,/雨夜街头/);assert.match(prompt,/1536x1024/);assert.match(prompt,/可见浅色珠子/);assert.match(prompt,/observed/);
  assert.doesNotMatch(prompt,/暖白背景|左上大字|温润有光|米色布面|干花|新品发布/);
  assert.doesNotMatch(prompt,/上文下图|粗黑体|衬线字|奶油色|暖白细沙|服务端准确排版/);
+ const freePrompt=productRenderPrompt('热汤用食材纹理和热气表现食欲，镜头与光影由本轮方案决定',product);
+ assert.match(freePrompt,/热汤用食材纹理和热气表现食欲/);assert.match(freePrompt,/区分商品固有特征与原照片/);
+ assert.doesNotMatch(freePrompt,/目标画布|1080x1440|黑金背景|标题区/);
  for(const patch of [{shot:'coastal'},{purpose:'awareness'},{campaign:{mode:'layout'}},{campaign:{layout:'top'}},{campaign:{palette:'warm'}}])assert.throws(()=>updateProduct(session,patch));
 });
 
@@ -56,6 +59,7 @@ test('factual selling copy requires known facts while creative copy is not force
  product.campaign.brand='虚构品牌';assert.match(campaignCopyIssue(product),/品牌/);product.campaign.brand='';
  product.campaign.offer='¥99';assert.match(campaignCopyIssue(product),/活动信息/);product.campaign.offer='';
  product.facts=[{basis:'unknown',text:'天然贝母'}];product.campaign.sellingPoints=['天然贝母'];assert.match(campaignCopyIssue(product),/卖点/);
+ product.facts=[{basis:'observed',text:'商品实拍图'}];product.campaign.sellingPoints=['真实天然材质'];assert.match(campaignCopyIssue(product),/卖点/);
  updateProduct(session,{facts:[{basis:'user',text:'用户品牌，价格 ¥99'},...Array.from({length:6},(_,i)=>({basis:'observed',text:'可见特征'+i}))],campaign:{brand:'用户品牌',offer:'¥99',sellingPoints:Array.from({length:6},(_,i)=>'可见特征'+i)}});
  assert.equal(campaignCopyIssue(product),null,'the user may request more than three grounded points');
 });

@@ -1,15 +1,16 @@
 import { originalFor, productPanelMarkup, taskMarkup } from './product.js';
 import { initDebugPanel } from './debug.js';
+import { initDownloadPanel } from './download.js';
 const $=id=>document.getElementById(id);
 const paths={sparkles:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z',grid:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',history:'M3 11a9 9 0 1 1 2 7 M3 4v7h7 M12 7v5l3 2',layers:'m12 3 10 5-10 5L2 8l10-5Z M2 12l10 5 10-5 M2 16l10 5 10-5',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2',plus:'M12 5v14 M5 12h14',download:'M12 3v12 m-5-5 5 5 5-5 M4 16v5h16v-5',upload:'M12 16V3 m-5 5 5-5 5 5 M4 16v5h16v-5',arrow:'M12 19V5 m-6 6 6-6 6 6',right:'m9 5 7 7-7 7',image:'M3 3h18v18H3z m0 14 6-6 5 5 3-3 4 4 M15 7h.01',layout:'M3 3h18v18H3z M3 9h18 M9 9v12',camera:'M3 7h4l2-3h6l2 3h4v13H3z M12 10a3 3 0 1 0 0 6 3 3 0 0 0 0-6',brush:'m14 3 7 7-10 10-7-7L14 3Z M4 13l-2 9 9-2',paperclip:'m8 12 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l9-9',more:'M5 12h.01 M12 12h.01 M19 12h.01'};
 const icon=(name,size=18)=>`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name]||paths.sparkles}"/></svg>`;
 paths.sliders='M4 7h7 M15 7h5 M4 17h3 M11 17h9 M11 4v6 M7 14v6';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state={config:null,skills:[],session:null,pending:false,zoom:1};
-let pollTimer,toastTimer,lastMessageSignature='';
+let pollTimer,toastTimer,lastMessageSignature='',uploadQueue=Promise.resolve(),queuedUploads=0;
 for(const [id,name] of Object.entries({workspaceNav:'grid',sessionsNav:'history',skillsNav:'layers',settingsNav:'settings',sessionMenu:'more',attachButton:'paperclip',sendButton:'arrow',canvasIcon:'image',skillChevron:'right'}))$(id).innerHTML=icon(name);
 $('debugNav').innerHTML=icon('sliders');$('debugButton').innerHTML=icon('sliders',16);
-$('newSession').innerHTML=icon('plus')+'新建创作';$('exportButton').innerHTML=icon('download')+'导出图片';$('uploadButton').innerHTML=icon('upload')+'上传图片';
+$('newSession').innerHTML=icon('plus')+'新建创作';$('exportButton').innerHTML=icon('download')+'下载作品';$('designButton').innerHTML=icon('layout')+'编辑设计稿';$('uploadButton').innerHTML=icon('upload')+'上传图片';
 function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,6000);}
 function localGet(key){try{return localStorage.getItem(key);}catch{return null;}}
 function localSet(key,value){try{localStorage.setItem(key,value);}catch{}}
@@ -19,21 +20,32 @@ async function api(url,options={}){
 }
 const running=()=>state.session?.job?.status==='running';
 const selected=()=>state.session?.versions.find(v=>v.id===state.session.selectedId);
+const imageLabel=(image,session)=>image.kind==='upload'?`参考图${session.referenceIds?.includes(image.id)?' '+(session.referenceIds.indexOf(image.id)+1):'片'}`:`V${image.number}`;
 function controls(){
   const locked=running()||state.pending||!state.session;
   for(const id of ['skillSelector','attachButton','uploadButton'])$(id).disabled=locked;
+  for(const button of document.querySelectorAll('[data-reference],[data-remove-reference],[data-version],#clearSelection'))button.disabled=locked;
   $('sendButton').disabled=locked||!$('prompt').value.trim();$('sendButton').hidden=running();$('stopButton').hidden=!running();$('stopButton').disabled=state.pending;
   $('exportButton').disabled=!selected();
+  $('designButton').disabled=!state.session;
   $('saveStatus').textContent=running()?'创作中':'已保存';
 }
 initDebugPanel({api,toast,onConfig:config=>{state.config=config;controls();}});
 function eventMarkup(events){return events.map(e=>e.type==='plan'?`<div class="event plan">${e.steps.map((s,i)=>`<div>${i+1}. ${esc(s)}</div>`).join('')}</div>`:`<div class="event ${esc(e.type)}">${esc(e.text||'')}</div>`).join('');}
 function welcome(){return `<div class="welcome-avatar">✳</div><div class="welcome-title">你好，今天想创作些什么？</div><p class="welcome-copy">给我一个想法、一张图片，或一点灵感。<br>我会运用你选择的技能，陪你把它变成作品。</p><div class="suggestions"><button class="suggestion" data-prompt="设计一张以陶瓷花瓶为主角的杂志海报，暖色调、大面积留白，不添加虚构品牌文案。"><span>${icon('layout')}</span>设计一张有留白感的杂志海报<span>↗</span></button><button class="suggestion" data-prompt="基于我上传的商品实拍，制作一张适合社交分享的商品推广图。根据商品和用途决定画面表达、构图及是否需要文字；商品信息以实拍和我提供的资料为准，不编造品牌、价格或优惠。"><span>${icon('camera')}</span>把商品实拍，做成推广图<span>↗</span></button><button class="suggestion" data-prompt="画一幅温暖的水彩插画：窗边的猫和绿植，午后阳光，细腻纸张肌理。"><span>${icon('brush')}</span>把午后的灵感，画成水彩<span>↗</span></button></div><div class="welcome-note">${icon('history',13)} 每个版本都会保存，放心尝试新想法。</div>`;}
+function messageContext(message,session){
+  const source=session.versions.find(v=>v.id===message.sourceId),count=message.referenceIds?.length||0;
+  return `${message.outputMode==='design'?'<span>可编辑设计稿</span>':''}${message.skillName?`<span>✧ ${esc(message.skillName)}</span>`:''}${count?`<span>${count} 张参考图</span>`:''}${source?.kind==='upload'?(!count?'<span>参考图片</span>':''):source?`<span>基于 V${source.number}</span>`:''}`;
+}
+function messageAttachments(message,session){
+  const images=(message.referenceIds||[]).map(id=>session.versions.find(v=>v.id===id)).filter(Boolean);
+  return images.length?`<div class="message-attachments" aria-label="本轮参考图片">${images.map((v,index)=>`<a class="message-attachment" data-message-image="${v.id}" href="${esc(v.url)}" target="_blank" rel="noopener" aria-label="查看参考图 ${index+1}：${esc(v.label)}" title="${esc(v.label)}"><img src="${esc(v.url)}" alt="${esc(v.label)}"><span>参考图 ${index+1}</span></a>`).join('')}</div>`:'';
+}
 function renderMessages(){
   const s=state.session, signature=JSON.stringify([s.id,s.messages,s.job]);
   if(signature===lastMessageSignature)return;lastMessageSignature=signature;
   const nearBottom=$('messages').scrollHeight-$('messages').scrollTop-$('messages').clientHeight<100;
-  $('messages').innerHTML=s.messages.length?s.messages.map(m=>`<article class="message ${m.role==='user'?'user':'assistant'} ${m.error?'error':''}"><div class="message-label">${m.role==='user'?'你':`<span class="mini-avatar">✳</span>画语助手`}</div><div class="message-text">${esc(m.text)}</div>${m.role==='user'?`<div class="message-context">${m.skillName?`<span>✧ ${esc(m.skillName)}</span>`:''}${m.sourceId?`<span>基于 V${s.versions.find(v=>v.id===m.sourceId)?.number||'?'}</span>`:''}</div>`:''}${m.events?.length?`<details class="event-log"><summary>查看执行记录 · ${m.events.length} 个事件</summary>${eventMarkup(m.events)}</details>`:''}${m.role==='assistant'?taskMarkup(m.task):''}</article>`).join(''):welcome();
+  $('messages').innerHTML=s.messages.length?s.messages.map(m=>`<article class="message ${m.role==='user'?'user':'assistant'} ${m.error?'error':''}"><div class="message-label">${m.role==='user'?'你':`<span class="mini-avatar">✳</span>画语助手`}</div><div class="message-text">${esc(m.text)}</div>${m.role==='user'?`${messageAttachments(m,s)}<div class="message-context">${messageContext(m,s)}</div>`:''}${m.task?.designResult?`<a class="design-result-link" href="/design.html?session=${s.id}">✧ 打开可编辑设计稿 · ${m.task.designResult.objectCount} 个对象</a>`:''}${m.events?.length?`<details class="event-log"><summary>查看执行记录 · ${m.events.length} 个事件</summary>${eventMarkup(m.events)}</details>`:''}${m.role==='assistant'?taskMarkup(m.task):''}</article>`).join(''):welcome();
   if(running())$('messages').insertAdjacentHTML('beforeend',`<div class="activity"><div class="activity-heading"><span class="spinner"></span>${state.config.mode==='demo'?'演示流程正在运行':'助手正在创作'}</div>${eventMarkup(s.job.events)}</div>`);
   if(nearBottom||running())$('messages').scrollTop=$('messages').scrollHeight;
   document.querySelectorAll('[data-prompt]').forEach(button=>button.onclick=()=>{$('prompt').value=button.dataset.prompt;localSet(`draft-${s.id}`,$('prompt').value);controls();$('prompt').focus();});
@@ -44,14 +56,19 @@ function render(){
   const productMode=skill?.workflow==='product-promotion';
   $('selectedSkillName').textContent=skill?.name||'自由创作';$('selectedSkillIcon').innerHTML=icon(skill?.icon||'sparkles');
   $('projectTitle').textContent=s.title;
-  const image=selected();$('emptyCanvas').hidden=!!image;$('imageStage').hidden=!image;$('imageMeta').hidden=!image;$('selectedContext').hidden=!image;
+  const image=selected();$('emptyCanvas').hidden=!!image;$('imageStage').hidden=!image;$('imageMeta').hidden=!image;$('selectedContext').hidden=!image||(image.kind==='upload'&&!s.referenceIds?.includes(image.id));
   if(image){
     if($('canvasImage').getAttribute('src')!==image.url)$('canvasImage').src=image.url;
-    $('canvasImage').alt=`V${image.number} · ${image.label}`;
-    $('imageMeta').textContent=`V${image.number} · ${image.width} × ${image.height} · ${image.demo?'演示示意图':image.kind==='upload'?'原始图片':image.product?'商品推广图':'生成图片'}`;
-    $('selectedContext').innerHTML=`<img src="${esc(image.url)}" alt=""><span>正在基于 V${image.number} 继续创作</span><button id="clearSelection" aria-label="取消选中图片" ${running()?'disabled':''}>×</button>`;
+    $('canvasImage').alt=`${imageLabel(image,s)} · ${image.label}`;
+    $('imageMeta').textContent=`${imageLabel(image,s)} · ${image.width} × ${image.height} · ${image.demo?'演示示意图':image.kind==='upload'?'原始图片':image.product?'商品推广图':'生成图片'}`;
+    $('selectedContext').innerHTML=`<img src="${esc(image.url)}" alt=""><span>${image.kind==='upload'?'当前预览':'正在基于'} ${imageLabel(image,s)}${image.kind==='upload'?'':' 继续创作'}</span><button id="clearSelection" aria-label="取消选中图片" title="取消图片选择并清空参考图" ${running()?'disabled':''}>×</button>`;
     $('clearSelection').onclick=()=>update({selectedId:null});
   }
+  const references=(s.referenceIds||[]).map(id=>s.versions.find(v=>v.id===id)).filter(Boolean);
+  $('referenceContext').hidden=!references.length;
+  $('referenceContext').innerHTML=references.length?`<div class="reference-heading"><span>本轮参考图 · ${references.length} / ${state.config.maxReferenceImages||8}</span><small>随消息发送</small></div><div class="reference-list">${references.map((v,index)=>`<div class="reference-card"><button type="button" class="reference-preview ${v.id===s.selectedId?'active':''}" data-reference="${v.id}" aria-label="预览参考图 ${index+1}：${esc(v.label)}" title="参考图 ${index+1} · ${esc(v.label)}"><img src="${esc(v.url)}" alt="${esc(v.label)}"><span>${index+1}</span></button><button type="button" class="reference-remove" data-remove-reference="${v.id}" aria-label="移除参考图 ${index+1}" title="从本轮附件中移除">×</button><div class="reference-name" title="${esc(v.label)}">${esc(v.label)}</div></div>`).join('')}</div>`:'';
+  document.querySelectorAll('[data-reference]').forEach(b=>b.onclick=()=>update({selectedId:b.dataset.reference}));
+  document.querySelectorAll('[data-remove-reference]').forEach(b=>b.onclick=()=>update({referenceIds:s.referenceIds.filter(id=>id!==b.dataset.removeReference)}));
   const productPanel=$('productPanel');
   const open=[...productPanel.querySelectorAll('details[open]')].map(el=>el.className);
   const productMarkup=productMode?productPanelMarkup(s):'';
@@ -59,9 +76,13 @@ function render(){
   for(const detail of productPanel.querySelectorAll('details'))if(open.includes(detail.className))detail.open=true;
   const original=image&&(productMode||image.productSourceId)?originalFor(s,image):null;
   $('compareButton').hidden=!original||original.id===image?.id;
-  $('canvasStatus').textContent=running()?'助手创作中，完成后将在这里显示。':image?'选择历史版本，可以从那里继续创作。':'每一次灵感，都值得保留。';
-  $('versionCount').textContent=s.versions.length;
-  $('versions').innerHTML=s.versions.length?s.versions.map(v=>`<button class="version-card ${v.id===s.selectedId?'selected':''}" data-version="${v.id}" ${running()?'disabled':''} title="V${v.number} · ${esc(v.label)}${v.parentId?' · 基于 V'+s.versions.find(p=>p.id===v.parentId)?.number:''}" aria-label="选择版本 ${v.number}" aria-pressed="${v.id===s.selectedId}"><img src="${esc(v.url)}" alt="${esc(v.label)}"><span>V${v.number}${v.demo?' · 演示':''}</span>${v.parentId?'<i class="branch-dot"></i>':''}</button>`).join(''):'<div class="version-empty">生成的图片会保存在这里，随时回到任何一个版本。</div>';
+  $('canvasStatus').textContent=running()?'助手创作中，完成后将在这里显示。':image?.kind==='upload'?'正在预览参考图，生成作品后可在下方切换版本。':image?'选择历史版本，可以从那里继续创作。':'每一次灵感，都值得保留。';
+  const versions=s.versions.filter(v=>v.kind!=='upload');
+  $('versionCount').textContent=versions.length;
+  $('versions').innerHTML=versions.length?versions.map(v=>{
+    const parent=versions.find(p=>p.id===v.parentId);
+    return `<button class="version-card ${v.id===s.selectedId?'selected':''}" data-version="${v.id}" ${running()?'disabled':''} title="V${v.number} · ${esc(v.label)}${parent?' · 基于 V'+parent.number:''}" aria-label="选择版本 ${v.number}" aria-pressed="${v.id===s.selectedId}"><img src="${esc(v.url)}" alt="${esc(v.label)}"><span>V${v.number}${v.demo?' · 演示':''}</span>${parent?'<i class="branch-dot"></i>':''}</button>`;
+  }).join(''):'<div class="version-empty">生成的图片会保存在这里，随时回到任何一个版本。</div>';
   document.querySelectorAll('[data-version]').forEach(b=>b.onclick=()=>{state.zoom=1;applyZoom();update({selectedId:b.dataset.version});});
   renderMessages();controls();
 }
@@ -109,26 +130,37 @@ $('sessionsNav').onclick=showSessions;$('sessionMenu').onclick=showSessions;
   $('settingsNav').onclick=()=>{const c=state.config;if(!c)return;$('settingsContent').innerHTML=`<div class="settings-row"><span>运行状态</span><strong>${c.mode==='demo'?'演示模式 · 无 AI 调用':'已配置真实 API'}</strong></div><div class="settings-row"><span>任务执行</span><span>OpenAI Agents SDK</span></div><div class="settings-row"><span>对话模型</span><span>${esc(c.agentModel)}</span></div><div class="settings-row"><span>图片模型</span><span>${esc(c.imageModel)}</span></div><div class="settings-row"><span>Sandbox</span><span>${esc(c.sandboxMode||'off')}</span></div><div class="settings-row"><span>图片调用上限</span><span>${c.maxImages==='unlimited'?'由用户和助手决定':`${c.maxImages} 次`}</span></div><p class="settings-note">${c.mode==='demo'?'当前展示的是本地示意图，不会理解或真实编辑图片。请在服务端配置 API Key 并重启。':'凭据只在服务端读取，不发送给浏览器。任务执行会产生模型和图片 API 费用。'}<br>图片和 Agent 回合均不设固定上限，任务仍受 5 分钟超时和“停止”按钮控制。会话和图片保存在本机。Skills 支持指令、参考资料、受控 Docker 脚本和已注册连接器；MCP 或未注册连接器仍需适配。</p>`;$('settingsDialog').showModal();};
 for(const b of document.querySelectorAll('.close-dialog'))b.onclick=()=>b.closest('dialog').close();
 for(const d of document.querySelectorAll('dialog'))d.onclick=e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)d.close();}};
-async function upload(file){
-  if(!file||running()||state.pending)return;
-  if(!['image/png','image/jpeg','image/webp'].includes(file.type))return toast('请选择 PNG、JPEG 或 WebP 图片');
-  if(file.size>10*1024*1024)return toast('图片最大 10 MB');
-  state.pending=true;controls();const id=state.session.id;
-  try{const data=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file);});const result=await api(`/api/sessions/${id}/upload`,{method:'POST',body:JSON.stringify({data,name:file.name})});if(state.session.id===id)state.session=result.session;toast('图片已加入画布，告诉助手如何调整它。');}
-  catch(e){toast(e.message||'上传失败');}finally{state.pending=false;render();$('imageInput').value='';}
+function upload(files){
+  const images=Array.from(files||[]);if(!images.length||!state.session)return;
+  if(running()||(state.pending&&!queuedUploads))return toast('请等待当前操作完成后再添加参考图');
+  if(images.some(file=>!['image/png','image/jpeg','image/webp'].includes(file.type)))return toast('请选择 PNG、JPEG 或 WebP 图片');
+  if(images.some(file=>file.size>10*1024*1024))return toast('每张图片最大 10 MB');
+  const id=state.session.id;let added=0;
+  queuedUploads++;state.pending=true;controls();$('imageInput').value='';
+  uploadQueue=uploadQueue.then(async()=>{
+    for(const file of images){
+      const data=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(new Error('图片读取失败'));r.readAsDataURL(file);});
+      const result=await api(`/api/sessions/${id}/upload`,{method:'POST',body:JSON.stringify({data,name:file.name})});
+      added++;if(state.session.id===id){state.session=result.session;render();}
+    }
+    if(state.session.id===id)toast(`已添加 ${added} 张图片，共 ${state.session.referenceIds.length} 张参考图。可以说明每张图的用途。`);
+  }).catch(e=>toast(`${added?`已添加 ${added} 张；`:''}${e.message||'上传失败'}`)).finally(()=>{queuedUploads--;state.pending=queuedUploads>0;render();});
+  return uploadQueue;
 }
 for(const id of ['attachButton','uploadButton'])$(id).onclick=()=>$('imageInput').click();
-$('imageInput').onchange=()=>upload($('imageInput').files[0]);
+$('imageInput').onchange=()=>upload($('imageInput').files);
 let dragDepth=0;
 $('canvasSurface').ondragenter=e=>{e.preventDefault();dragDepth++;if(!running())$('dropOverlay').hidden=false;};
 $('canvasSurface').ondragover=e=>e.preventDefault();
 $('canvasSurface').ondragleave=e=>{e.preventDefault();if(--dragDepth<=0)$('dropOverlay').hidden=true;};
-$('canvasSurface').ondrop=e=>{e.preventDefault();dragDepth=0;$('dropOverlay').hidden=true;upload(e.dataTransfer.files[0]);};
-window.addEventListener('paste',e=>{const image=[...(e.clipboardData?.files||[])].find(f=>f.type.startsWith('image/'));if(image){e.preventDefault();upload(image);}});
+$('canvasSurface').ondrop=e=>{e.preventDefault();dragDepth=0;$('dropOverlay').hidden=true;upload(e.dataTransfer.files);};
+window.addEventListener('paste',e=>{const images=[...(e.clipboardData?.files||[])].filter(f=>f.type.startsWith('image/'));if(images.length){e.preventDefault();upload(images);}});
 $('importSkill').onclick=()=>$('skillInput').click();
 $('skillInput').onchange=async()=>{const file=$('skillInput').files[0];if(!file)return;if(file.size>64000)return toast('技能文件最大 64 KB');try{await api('/api/skills',{method:'POST',body:JSON.stringify({text:await file.text()})});state.skills=await api('/api/skills');showSkills();toast('技能已导入。如果有配套参考文件，请使用服务端技能目录。');}catch(e){toast(e.message);}finally{$('skillInput').value='';}};
 $('importSkillUrl').onclick=async()=>{const sourceUrl=$('skillUrl').value.trim();if(!sourceUrl)return toast('请输入 GitHub 仓库地址');$('importSkillUrl').disabled=true;try{const result=await api('/api/skills',{method:'POST',body:JSON.stringify({sourceUrl})});state.skills=await api('/api/skills');$('skillUrl').value='';showSkills();toast(`已从 GitHub 导入 ${result.imported?.length||0} 个 Skill`);}catch(e){toast(e.message);}finally{$('importSkillUrl').disabled=false;}};
-$('exportButton').onclick=()=>{const v=selected();if(!v)return;const a=document.createElement('a');a.href=v.url;a.download=`canvas-v${v.number}.png`;a.click();};
+const openDownload=initDownloadPanel({api,toast,context:()=>({session:state.session,image:selected()}),token:()=>state.config?.token});
+$('exportButton').onclick=openDownload;
+$('designButton').onclick=()=>{if(state.session){const image=selected();location.href=`/design.html?session=${state.session.id}${image&&!image.demo?`&source=${image.id}`:''}`;}};
 function applyZoom(){$('artboard').style.transform=`scale(${state.zoom})`;$('zoomReset').textContent=state.zoom===1?'适应':Math.round(state.zoom*100)+'%';}
 $('zoomIn').onclick=()=>{state.zoom=Math.min(2.5,state.zoom+.25);applyZoom();};$('zoomOut').onclick=()=>{state.zoom=Math.max(.25,state.zoom-.25);applyZoom();};$('zoomReset').onclick=()=>{state.zoom=1;applyZoom();};
 window.addEventListener('focus',()=>{if(state.session&&!state.pending)refresh();});

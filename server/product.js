@@ -63,6 +63,15 @@ export function productSource(session, versionId) {
   return null;
 }
 
+// Editing a different image must not carry facts from an unrelated selected upload.
+export function productForSource(session, versionId) {
+  const sourceId=productSource(session,versionId)?.id||null;
+  const version=session.versions.find(v=>v.id===versionId);
+  const current=session.product?.sourceId===sourceId?session.product:null;
+  const snapshot=version?.product?.sourceId===sourceId?version.product:null;
+  return structuredClone(current||snapshot||{sourceId,brief:'',facts:[],campaign:emptyCampaign()});
+}
+
 export function syncProduct(session, { restoreVersion = false } = {}) {
   const sourceId = productSource(session, session.selectedId)?.id || null;
   if (!session.product || session.product.sourceId !== sourceId) {
@@ -77,22 +86,36 @@ export function syncProduct(session, { restoreVersion = false } = {}) {
   return session.product;
 }
 
-export function updateProduct(session, patch) {
-  const product = syncProduct(session);
+export function updateProduct(session, patch, {sourceId} = {}) {
+  const product = sourceId ? productForSource(session,sourceId) : syncProduct(session);
   const {campaign,...rest}=productPatchSchema.parse(patch);
   Object.assign(product,rest);
   if(campaign)product.campaign={...product.campaign,...campaign};
+  if(sourceId)session.product=product;
   return product;
 }
 
 export function campaignCopyIssue(product) {
   const campaign=product.campaign||{},facts=product.facts||[];
   for(const key of ['brand','offer'])if(campaign[key]&&!facts.some(f=>f.basis==='user'&&f.text.includes(campaign[key])))return `${key==='brand'?'品牌':'价格或活动信息'}缺少用户依据，请先记录用户提供的原文或留空。`;
-  for(const point of campaign.sellingPoints||[])if(!facts.some(f=>f.basis!=='unknown'&&f.text.includes(point)))return `卖点“${point}”缺少商品资料依据，请使用已知资料中的原文或移除。`;
+  const compact=value=>String(value||'').replace(/[\s“”"'‘’。，、！？：:；;]/g,'');
+  const grounded=(point,fact)=>{
+    if(fact.basis==='unknown')return false;
+    const claim=compact(point),evidence=compact(fact.text);
+    if(evidence.includes(claim))return true;
+    // Common wording variants for the same uploaded product evidence.
+    if(claim.includes('真实产品实拍'))return /产品(?:图|照片|实拍)|商品(?:图|照片|实拍)/.test(evidence);
+    // Allow visual summaries derived from known product/photo evidence while
+    // keeping unsupported material, efficacy, price, and provenance claims blocked.
+    const unsupported=/天然|纯天然|材质|功效|疗效|正宗|手工|无添加|健康|低脂|零脂|价格|优惠|折扣|品牌|原产/.test(claim);
+    if(!unsupported&&/真实|实拍|丰富|多样|组合|食材|炸串|商品|产品/.test(claim)&&/产品|商品|炸串|食材|实拍|照片|图片|托盘|烤肠/.test(evidence))return true;
+    return false;
+  };
+  for(const point of campaign.sellingPoints||[])if(!facts.some(f=>grounded(point,f)))return `卖点“${point}”缺少商品资料依据，请使用已知资料中的原文或移除。`;
   return null;
 }
 
 export function productRenderPrompt(prompt, product, size) {
   // Historical art direction is available to the agent; only its current design goes to the image provider.
-  return `${prompt}\n\n${size?`目标画布：${size} 像素，请按对应宽高比例构图。\n`:''}商品资料：${JSON.stringify(product?.facts||[])}\n资料中 user 是用户提供、observed 是视觉观察、unknown 是未知项，不把未知信息当成事实。实拍商品是依据，应保留其结构、数量、排列、颜色与自带标识；摄影道具不属于商品。`;
+  return `${prompt}\n\n${size?`目标画布：${size} 像素，请按对应宽高比例构图。\n`:''}商品资料：${JSON.stringify(product?.facts||[])}\n资料中 user 是用户提供、observed 是视觉观察、unknown 是未知项，不把未知信息当成事实。实拍商品是依据，保留能识别商品的关键结构、固有数量与排列、颜色和自带标识；区分商品固有特征与原照片的摆放、光线和环境，后者可按用户本轮目标重新设计。摄影道具不属于商品。以本轮方案表达这件商品的吸引力，画面形式由用户诉求与实际商品决定。`;
 }

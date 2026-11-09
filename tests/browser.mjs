@@ -37,12 +37,13 @@ try{
  await page.setViewportSize({width:1066,height:914});
  assert.ok(await page.evaluate(()=>{const a=document.getElementById('canvasImage').getBoundingClientRect(),b=document.getElementById('imageStage').getBoundingClientRect();return a.bottom<=b.bottom+1&&a.top>=b.top-1&&a.width<=b.width+1;}),'fit view contains complete image');
  await page.setViewportSize({width:1440,height:1000});
- const downloadPromise=page.waitForEvent('download');await page.locator('#exportButton').click();assert.match((await downloadPromise).suggestedFilename(),/canvas-v3\.png/);
+ await page.locator('#exportButton').click();const downloadPromise=page.waitForEvent('download');await page.locator('#downloadSubmit').click();assert.match((await downloadPromise).suggestedFilename(),/canvas-v3\.png/);
  await page.locator('#skillSelector').click();await page.locator('#skillInput').setInputFiles({name:'SKILL.md',mimeType:'text/markdown',buffer:Buffer.from('---\nname: Browser Test\ndescription: Imported skill\n---\nUse soft colors.')});
  await page.getByRole('button',{name:/Browser Test/}).click();await page.waitForFunction(()=>document.getElementById('selectedSkillName').textContent==='Browser Test');
  await page.locator('#newSession').click();await page.waitForFunction(()=>document.querySelectorAll('.version-card').length===0);
  const upload=await sharp({create:{width:100,height:100,channels:3,background:'#acb'}}).png().toBuffer();
- await page.locator('#imageInput').setInputFiles({name:'upload.png',mimeType:'image/png',buffer:upload});await page.waitForFunction(()=>document.querySelectorAll('.version-card').length===1);
+ await page.locator('#imageInput').setInputFiles({name:'upload.png',mimeType:'image/png',buffer:upload});await page.waitForFunction(()=>document.querySelectorAll('[data-reference]').length===1&&!document.getElementById('attachButton').disabled);
+ assert.equal(await page.locator('.version-card').count(),0,'uploads are references rather than result versions');
  await page.locator('#sessionsNav').click();await page.locator(`[data-session="${id}"]`).click();await page.waitForFunction(()=>document.querySelectorAll('.version-card').length===3);
  await setPrompt('cancel test');await page.locator('#sendButton').click();await page.locator('#stopButton').click();await page.waitForFunction(()=>!document.getElementById('stopButton').checkVisibility());
  assert.equal(await page.locator('.version-card').count(),3);
@@ -69,7 +70,7 @@ try{
  assert.equal(await page.locator('#productSize').count(),0);
  assert.equal(await page.locator('#productReview').count(),0,'inspection panel is removed');
  assert.match(await page.locator('#imageMeta').innerText(),/商品推广图/);
- assert.equal(await page.locator('.version-card').count(),2,'only the upload and result are visible');
+ assert.equal(await page.locator('.version-card').count(),1,'only the generated result is visible in version history');
  await page.locator('.product-facts summary').click();assert.match(await page.locator('.product-facts').innerText(),/视觉观察/);assert.match(await page.locator('.product-facts').innerText(),/待确认/);assert.match(await page.locator('.product-facts').innerText(),/森林苔藓/);
  await page.locator('.task-details>summary').click();assert.match(await page.locator('.task-details').innerText(),/实际扣费：未知/);
  await page.screenshot({path:path.join(root,'test-results/product-desktop.png'),fullPage:true});
@@ -84,9 +85,9 @@ try{
  await page.screenshot({path:path.join(root,'test-results/product-mobile.png'),fullPage:true});
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'product UI has no mobile horizontal overflow');
  await page.locator('#compareButton').click();assert.ok(await page.evaluate(()=>document.getElementById('compareDialog').scrollWidth<=document.getElementById('compareDialog').clientWidth),'mobile comparison fits dialog');await page.locator('#compareDialog .close-dialog').click();
- await page.getByRole('button',{name:'选择版本 1',exact:true}).click();await page.locator('#compareButton').waitFor({state:'hidden'});
+ await page.locator('[data-reference]').first().click();await page.locator('#compareButton').waitFor({state:'hidden'});
  await page.getByRole('button',{name:'取消选中图片',exact:true}).click();await page.locator('#productPanel').waitFor({state:'hidden'});
- await page.locator('#selectedContext').waitFor({state:'hidden'});assert.equal(await page.locator('.version-card').count(),2,'clearing the reference preserves version history');
+ await page.locator('#selectedContext').waitFor({state:'hidden'});assert.equal(await page.locator('.version-card').count(),1,'clearing the reference preserves generated version history');
  // Debug settings use this isolated demo data directory; no external model calls.
  await page.setViewportSize({width:1440,height:1000});await page.locator('#debugNav').click();
  await page.locator('#debugSaveRoutes').waitFor();

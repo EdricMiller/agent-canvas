@@ -7,8 +7,8 @@ export const connectors = {
   },
   'canvas-artifacts': {
     name: 'Canvas Artifacts',
-    description: '保存图片版本与父子关系。',
-    tools: ['render_image', 'render_menu_layout'],
+    description: '保存图片版本与父子关系，并支持确定性换色和透明 Logo 合成。',
+    tools: ['render_image', 'render_menu_layout', 'recolor_image', 'compose_logo_on_image'],
     configured: () => true,
   },
 };

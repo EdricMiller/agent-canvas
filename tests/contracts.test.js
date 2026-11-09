@@ -13,9 +13,9 @@ import {DockerSandboxClient, UnixLocalSandboxClient} from '@openai/agents/sandbo
 import {runSkillScript} from '../server/skill-runner.js';
 import {syncProduct} from '../server/product.js';
 const root=path.resolve(import.meta.dirname,'..');
-async function fixture(t,execute){
+async function fixture(t,execute,extra={}){
  const dataDir=fs.mkdtempSync(path.join(os.tmpdir(),'canvas-test-'));
- const instance=createApp({root,dataDir,demo:true,maxImages:2,agentModel:'test',imageModel:'test'},{execute});
+ const instance=createApp({root,dataDir,demo:true,maxImages:2,agentModel:'test',imageModel:'test',...extra},{execute});
  const server=await new Promise((resolve,reject)=>{const s=instance.app.listen(0,'127.0.0.1');s.once('listening',()=>resolve(s));s.once('error',reject);});
  t.after(()=>{instance.shutdown();server.closeAllConnections();server.close();fs.rmSync(dataDir,{recursive:true,force:true});});
  const base=`http://127.0.0.1:${server.address().port}`;
@@ -52,6 +52,119 @@ test('upload is decoded; sessions cannot select each other’s images',async t=>
  assert.equal((await f.req(`/api/sessions/${other.id}`,'PATCH',{selectedId:upload.version.id})).status,400);
  assert.equal((await f.req(`/api/sessions/${s.id}/upload`,'POST',{name:'bad.png',data:'data:image/png;base64,SGVsbG8='})).status,400);
  assert.equal((await f.req(`/api/sessions/${s.id}/upload`,'POST',{name:'x.svg',data:'data:image/svg+xml;base64,AAAA'})).status,400);
+});
+test('references become message attachments after submission and preserve history across restart',async t=>{
+ let executedIds;
+ const f=await fixture(t,async({session,job})=>{executedIds=[...job.referenceIds];assert.deepEqual(session.referenceIds,[]);return '已同时读取参考图。';}),{data:s}=await f.req('/api/sessions','POST');
+ const url=`/api/sessions/${s.id}`;
+ await f.req(url,'PATCH',{skillId:'menu-design'});
+ const bytes=await sharp({create:{width:40,height:30,channels:3,background:'#abc'}}).png().toBuffer();
+ const upload=async name=>(await f.req(url+'/upload','POST',{name,data:'data:image/png;base64,'+bytes.toString('base64')})).data;
+ const first=await upload('菜单明细.png'),second=await upload('Logo.png');
+ const ids=[first.version.id,second.version.id];
+ assert.deepEqual(second.session.referenceIds,ids);
+ assert.deepEqual((await f.req(url,'PATCH',{selectedId:ids[0]})).data.referenceIds,ids,'previewing a reference preserves the others');
+ const generated=f.store.addImage(f.store.get(s.id),bytes,{kind:'generated',demo:false,parentId:ids[0]});
+ assert.equal(generated.number,1,'references do not consume generated version numbers');
+ assert.deepEqual(f.store.get(s.id).referenceIds,ids,'generated output does not replace references');
+ assert.deepEqual(new Store(f.dataDir).get(s.id).referenceIds,ids);
+ const turn=await f.req(url+'/turns','POST',{text:'第一张是菜单，第二张是 Logo',requestId:randomUUID()});
+ assert.equal(turn.status,202);
+ assert.deepEqual(turn.data.session.referenceIds,[],'accepted submission clears draft references immediately');
+ const done=await f.wait(s.id);
+ assert.deepEqual(executedIds,ids,'the running task uses the attachment snapshot');
+ assert.deepEqual(done.messages.find(m=>m.role==='user').referenceIds,ids);
+ assert.deepEqual(done.job.referenceIds,ids);
+ const restored=new Store(f.dataDir).get(s.id);
+ assert.deepEqual(restored.referenceIds,[]);assert.deepEqual(restored.messages.find(m=>m.role==='user').referenceIds,ids);
+ assert.deepEqual((await f.req(url,'PATCH',{referenceIds:[ids[1]]})).data.referenceIds,[ids[1]]);
+ assert.equal((await f.req(url)).data.selectedId,generated.id,'removing a reference keeps a selected design');
+ await f.req(url,'PATCH',{selectedId:ids[1]});
+ const removed=await f.req(url,'PATCH',{referenceIds:[]});
+ assert.equal(removed.data.selectedId,null);assert.equal(removed.data.versions.length,3,'removing references keeps version history');
+ assert.deepEqual(removed.data.messages.find(m=>m.role==='user').referenceIds,ids,'past turns retain their reference snapshot');
+ await f.req(url,'PATCH',{selectedId:ids[0]});
+ assert.deepEqual((await f.req(url)).data.referenceIds,[ids[0]],'selecting an old upload can reattach it');
+ const cleared=await f.req(url,'PATCH',{selectedId:null});
+ assert.deepEqual(cleared.data.referenceIds,[]);
+ assert.deepEqual(new Store(f.dataDir).get(s.id).referenceIds,[],'explicitly cleared references stay cleared after restart');
+});
+test('rejected submissions keep draft images; following turns do not attach them again',async t=>{
+ const f=await fixture(t,async()=> '已收到。'),s=f.store.create();
+ const bytes=await sharp({create:{width:10,height:10,channels:3,background:'#abc'}}).png().toBuffer();
+ const image=f.store.addImage(s,bytes,{kind:'upload',demo:false}),url=`/api/sessions/${s.id}/turns`;
+ assert.equal((await f.req(url,'POST',{text:' ',requestId:randomUUID()})).status,400);
+ assert.deepEqual(s.referenceIds,[image.id]);assert.equal(s.messages.length,0);
+ const requestId=randomUUID();
+ assert.equal((await f.req(url,'POST',{text:'先看这张图片',requestId})).status,202);await f.wait(s.id);
+ assert.deepEqual(s.referenceIds,[]);
+ const duplicate=await f.req(url,'POST',{text:'先看这张图片',requestId});
+ assert.equal(duplicate.data.duplicate,true);assert.equal(s.messages.filter(m=>m.role==='user').length,1);
+ await f.req(url,'POST',{text:'继续讨论',requestId:randomUUID()});await f.wait(s.id);
+ assert.deepEqual(s.messages.filter(m=>m.role==='user').map(m=>m.referenceIds),[[image.id],[]]);
+});
+test('generated image references retain their version identity and become turn attachments',async t=>{
+ let executedIds;
+ const f=await fixture(t,async({job})=>{executedIds=[...job.referenceIds];return '已参考指定版本。';}),s=f.store.create();
+ const bytes=await sharp({create:{width:10,height:10,channels:3,background:'#abc'}}).png().toBuffer();
+ const first=f.store.addImage(s,bytes,{kind:'generated',demo:false,label:'指定旧版本'});
+ const latest=f.store.addImage(s,bytes,{kind:'generated',demo:false,parentId:first.id,label:'最新版本'});
+ const url=`/api/sessions/${s.id}`;
+ const added=await f.req(url,'PATCH',{referenceIds:[first.id]});
+ assert.equal(added.status,200);assert.deepEqual(added.data.referenceIds,[first.id]);
+ assert.equal(added.data.selectedId,latest.id,'adding a reference does not replace the current editing source');
+ assert.equal(added.data.versions.length,2,'referencing a version does not copy it or renumber history');
+ assert.deepEqual(new Store(f.dataDir).get(s.id).referenceIds,[first.id]);
+ assert.equal((await f.req(url,'PATCH',{referenceIds:[]})).status,200);
+ assert.equal(s.selectedId,latest.id,'removing a generated reference preserves the selected output');
+ await f.req(url,'PATCH',{referenceIds:[first.id,latest.id]});
+ const sent=await f.req(url+'/turns','POST',{text:'参考第一张的版式和第二张的配色',requestId:randomUUID()});
+ assert.equal(sent.status,202);assert.deepEqual(sent.data.session.referenceIds,[]);
+ const done=await f.wait(s.id);
+ assert.deepEqual(executedIds,[first.id,latest.id]);
+ assert.deepEqual(done.messages.find(m=>m.role==='user').referenceIds,[first.id,latest.id]);
+ assert.equal(done.versions.length,2);
+ assert.deepEqual(new Store(f.dataDir).get(s.id).messages[0].referenceIds,[first.id,latest.id]);
+});
+test('reference updates reject foreign, demo and duplicate images; concurrent uploads respect the limit',async t=>{
+ const f=await fixture(t),s=f.store.create(),other=f.store.create();
+ const bytes=await sharp({create:{width:10,height:10,channels:3,background:'#abc'}}).png().toBuffer();
+ const foreign=f.store.addImage(other,bytes,{kind:'upload',demo:false});
+ const demo=f.store.addImage(s,bytes,{kind:'generated',demo:true});
+ const local=f.store.addImage(s,bytes,{kind:'upload',demo:false});
+ const url=`/api/sessions/${s.id}`;
+ for(const referenceIds of [[foreign.id],[demo.id],[local.id,local.id]])assert.equal((await f.req(url,'PATCH',{referenceIds})).status,400);
+ assert.deepEqual(f.store.get(s.id).referenceIds,[local.id]);
+ for(let i=0;i<6;i++)f.store.addImage(s,bytes,{kind:'upload',demo:false});
+ const payload={name:'reference.png',data:'data:image/png;base64,'+bytes.toString('base64')};
+ const results=await Promise.all([f.req(url+'/upload','POST',payload),f.req(url+'/upload','POST',payload)]);
+ assert.deepEqual(results.map(r=>r.status).sort(),[201,400]);
+ assert.equal(f.store.get(s.id).referenceIds.length,8);assert.equal(f.store.get(s.id).versions.length,9);
+ assert.match(results.find(r=>r.status===400).data.error,/最多参考 8 张/);
+});
+test('legacy sessions restore both uploaded references while preserving cleared selection',async t=>{
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'canvas-legacy-references-'));t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
+ const store=new Store(temp),session=store.create(),cleared=store.create();
+ const bytes=await sharp({create:{width:10,height:10,channels:3,background:'#abc'}}).png().toBuffer();
+ for(const s of [session,cleared]){
+  store.addImage(s,bytes,{kind:'upload',demo:false,label:'菜单明细'});store.addImage(s,bytes,{kind:'upload',demo:false,label:'Logo'});
+  delete s.referenceIds;delete s.referenceScope;if(s===cleared)s.selectedId=null;store.save(s);
+ }
+ const restored=new Store(temp);
+ assert.deepEqual(restored.get(session.id).referenceIds,session.versions.map(v=>v.id));
+ assert.deepEqual(restored.get(cleared.id).referenceIds,[]);
+});
+test('migration moves previously sent references into messages while retaining unsent drafts',async t=>{
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'canvas-message-attachments-'));t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
+ const store=new Store(temp),session=store.create();
+ const bytes=await sharp({create:{width:10,height:10,channels:3,background:'#abc'}}).png().toBuffer();
+ const sent=store.addImage(session,bytes,{kind:'upload',demo:false}),draft=store.addImage(session,bytes,{kind:'upload',demo:false});
+ session.messages.push({id:'legacy-user',role:'user',text:'参考这张图片',sourceId:sent.id,referenceIds:[sent.id]});
+ delete session.referenceScope;store.save(session);
+ const restoredStore=new Store(temp),restored=restoredStore.get(session.id);
+ assert.deepEqual(restored.referenceIds,[draft.id]);assert.deepEqual(restored.messages[0].referenceIds,[sent.id]);
+ restored.referenceIds.push(sent.id);restoredStore.save(restored);
+ assert.deepEqual(new Store(temp).get(session.id).referenceIds,[draft.id,sent.id],'explicitly reattached images survive later restarts');
 });
 test('rejects cross-origin writes, missing token and unknown skill',async t=>{
  const f=await fixture(t);
@@ -159,4 +272,35 @@ test('skill script runner validates declared scripts before Docker execution',as
  const skillDir=path.join(temp,'script');fs.mkdirSync(path.join(skillDir,'scripts'),{recursive:true});fs.writeFileSync(path.join(skillDir,'SKILL.md'),'---\nname: Script\ndescription: Runs a script\nallowed-tools: Bash\n---\nrun it');fs.writeFileSync(path.join(skillDir,'scripts','hello.py'),'print("hello")');
  const skills=new Skills([temp],path.join(temp,'imports')),skill=skills.get('script');
  await assert.rejects(()=>runSkillScript({skill,script:'references/no.py',config:{sandboxMode:'docker',sandboxImage:'python:3.12-slim'},signal:new AbortController().signal}),/scripts/);
+});
+test('a turn that exceeds the deadline reports a timeout instead of a manual stop',async t=>{
+ const f=await fixture(t,({signal})=>new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true})),{turnTimeoutMs:150,settleGraceMs:60});
+ const {data:s}=await f.req('/api/sessions','POST');
+ assert.equal((await f.req(`/api/sessions/${s.id}/turns`,'POST',{text:'生图',requestId:randomUUID()})).status,202);
+ const done=await f.wait(s.id);
+ assert.equal(done.job.status,'cancelled');
+ assert.match(done.job.error,/本轮执行超时（\d+ 毫秒）/);
+ assert.equal(done.messages.at(-1).error,true);
+ assert.match(done.messages.at(-1).text,/本轮执行超时/);
+});
+test('manual stop keeps the stopped wording',async t=>{
+ const f=await fixture(t,()=>new Promise(()=>{}),{turnTimeoutMs:30000,settleGraceMs:60});
+ const {data:s}=await f.req('/api/sessions','POST');
+ await f.req(`/api/sessions/${s.id}/turns`,'POST',{text:'生图',requestId:randomUUID()});
+ await f.req(`/api/sessions/${s.id}/cancel`,'POST');
+ const done=await f.wait(s.id);
+ assert.equal(done.job.status,'cancelled');
+ assert.match(done.job.error,/^本轮已停止。/);
+});
+test('a task that ignores the abort signal is force-closed so the session stays usable',async t=>{
+ const f=await fixture(t,()=>new Promise(()=>{}),{turnTimeoutMs:120,settleGraceMs:80});
+ const {data:s}=await f.req('/api/sessions','POST');
+ assert.equal((await f.req(`/api/sessions/${s.id}/turns`,'POST',{text:'生图',requestId:randomUUID()})).status,202);
+ const done=await f.wait(s.id);
+ assert.equal(done.job.status,'cancelled','the watchdog ends the turn even when the provider promise never settles');
+ assert.match(done.messages.at(-1).text,/本轮执行超时/);
+ const next=await f.req(`/api/sessions/${s.id}/turns`,'POST',{text:'再来一次',requestId:randomUUID()});
+ assert.equal(next.status,202,'a stuck turn must not leave the session busy forever');
+ await f.req(`/api/sessions/${s.id}/cancel`,'POST');
+ await f.wait(s.id);
 });

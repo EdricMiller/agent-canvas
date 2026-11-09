@@ -2,6 +2,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
+import {createWebApp} from './web.js';
 import { loadCredentials } from './config.js';
 import { ModelSettings } from './model-settings.js';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
@@ -19,7 +20,14 @@ const imageLimitValue=String(process.env.MAX_IMAGES_PER_TURN||'unlimited').toLow
 const maxImages=['unlimited','infinite','0'].includes(imageLimitValue)?Infinity:Math.min(100,Math.max(1,Number(imageLimitValue)||2));
 const turnLimitValue=String(process.env.AGENT_MAX_TURNS||'unlimited').toLowerCase();
 const maxTurns=['unlimited','infinite','0'].includes(turnLimitValue)?null:Math.min(200,Math.max(1,Number(turnLimitValue)||24));
-const config={root,dataDir:process.env.STUDIO_DATA_DIR||path.join(root,'.data'),skillsDir:process.env.SKILLS_DIR,apiKey,baseURL,imageApiKey,imageBaseURL,agentModel:process.env.AGENT_MODEL||'gpt-6.1-sol',imageModel:process.env.IMAGE_MODEL||'gpt-image-2.5-sunburst',imageSize,maxImages,maxTurns,sandboxMode,sandboxImage,sandboxNetwork,sandboxWorkspace:process.env.SANDBOX_WORKSPACE||undefined,demo:true};
+const milliseconds=(value,fallback,min,max)=>{const ms=Number(value);return Number.isFinite(ms)&&ms>0?Math.min(max,Math.max(min,Math.round(ms))):fallback;};
+// 单轮上限默认 15 分钟：一次精细生图本身就可能花 3–4 分钟。
+const turnTimeoutMs=milliseconds(process.env.TURN_TIMEOUT_MS,900000,30000,3600000);
+// 时限到达时若生图请求已在执行，先顺延一次，避免掐掉已提交（已计费）的请求。
+const imageGraceMs=milliseconds(process.env.IMAGE_GRACE_MS,300000,30000,1800000);
+// 中止后等待底层请求自行结束的时间，超过则强制收尾并释放会话。
+const settleGraceMs=milliseconds(process.env.TURN_SETTLE_GRACE_MS,30000,5000,300000);
+const config={root,dataDir:process.env.STUDIO_DATA_DIR||path.join(root,'.data'),skillsDir:process.env.SKILLS_DIR,apiKey,baseURL,imageApiKey,imageBaseURL,agentModel:process.env.AGENT_MODEL||'gpt-6.1-sol',imageModel:process.env.IMAGE_MODEL||'gpt-image-2.5-sunburst',imageSize,maxImages,maxTurns,turnTimeoutMs,imageGraceMs,settleGraceMs,sandboxMode,sandboxImage,sandboxNetwork,sandboxWorkspace:process.env.SANDBOX_WORKSPACE||undefined,demo:true};
 // The saved registry takes precedence over environment defaults, including on first live startup.
 Object.assign(config,new ModelSettings(config).runtimeConfig());
 config.demo=mode==='demo'||!config.apiKey;
@@ -32,8 +40,9 @@ if(sandboxMode==='docker'&&!config.demo) {
     throw new Error(`SANDBOX_MODE=docker 需要可用的 Docker daemon。请启动 Docker Desktop 后重试。${detail?` (${detail})`:''}`);
   }
 }
-const {app,shutdown}=createApp(config);
 const port=Number(process.env.PORT)||4320;
+const legacy=process.argv.includes('--legacy'),dev=process.argv.includes('--dev');
+const {app,shutdown}=legacy?createApp(config):await createWebApp(config,{dev,port});
 const server=app.listen(port,'127.0.0.1',()=>console.log(`画语 Canvas → http://127.0.0.1:${port} (${config.demo?'DEMO — no AI calls':'LIVE'})`));
 server.on('error',error=>{console.error(`无法启动：${error.code}`);process.exitCode=1;});
-for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{shutdown();server.close(()=>process.exit(0));});
+for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{shutdown();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),5000).unref();});

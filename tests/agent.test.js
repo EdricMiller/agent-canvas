@@ -102,7 +102,9 @@ test('product generation and subsequent edits preserve agent direction, original
   if(new URL(url).pathname==='/v1/images/edits'){
    imageCalls++;
    assert.equal(body.get('model'),'image-test');
-   assert.deepEqual(Buffer.from(await body.get('image').arrayBuffer()),originalBytes,'the actual edit input stays the uploaded product');
+   const inputs=body.getAll('image[]');assert.equal(inputs.length,2);
+   assert.deepEqual(Buffer.from(await inputs[0].arrayBuffer()),editing?firstBytes:previousBytes,'the selected poster is the actual first edit input');
+   assert.deepEqual(Buffer.from(await inputs[1].arrayBuffer()),originalBytes,'the original product remains an auxiliary reference');
    assert.match(body.get('prompt'),/森林苔藓/);assert.match(body.get('prompt'),/observed/);
    assert.ok(body.get('prompt').includes(editing?'1024x1024':'1536x1024'),'the agent can arrange the canvas without a user control');
    assert.ok(body.get('prompt').includes(editing?'给日常，一点微光':'把微光，戴进日常'));
@@ -131,7 +133,7 @@ test('product generation and subsequent edits preserve agent direction, original
  assert.equal(imageCalls,1);assert.equal(session.size,'1536x1024');
  assert.equal(firstInput.at(-1).content.filter(c=>c.type==='input_image').length,2,'planning sees selected design and original');
  const version=session.versions.at(-1);
- assert.equal(version.parentId,previous.id);assert.equal(version.renderSourceId,original.id);assert.equal(version.productSourceId,original.id);
+ assert.equal(version.parentId,previous.id);assert.equal(version.renderSourceId,previous.id);assert.deepEqual(version.renderSourceIds,[previous.id,original.id]);assert.equal(version.productSourceId,original.id);
  assert.equal(version.product.facts[0].basis,'observed');assert.match(version.product.brief,/弧线/);assert.equal(version.generation.model,'image-test');assert.equal(version.usage,null);
  assert.equal(version.kind,'generated');assert.equal(version.width,20);assert.equal(version.height,20);assert.equal(session.versions.length,3);
  assert.deepEqual(store.image(session,version.id).bytes,firstBytes,'the provider image is not rearranged or typeset locally');
@@ -143,10 +145,10 @@ test('product generation and subsequent edits preserve agent direction, original
  const updated=session.versions.at(-1);
  assert.equal(imageCalls,2,'a requested edit uses one image call and the extra automatic attempt is blocked');
  assert.equal(editJob.imageCalls,1);assert.equal(session.size,'1024x1024');
- assert.equal(updated.parentId,version.id);assert.equal(updated.renderSourceId,original.id);assert.equal(updated.product.campaign.headline,'给日常，一点微光');assert.equal(version.product.campaign.headline,'把微光，戴进日常');assert.equal(session.versions.length,4);
+ assert.equal(updated.parentId,version.id);assert.equal(updated.renderSourceId,version.id);assert.deepEqual(updated.renderSourceIds,[version.id,original.id]);assert.equal(updated.product.campaign.headline,'给日常，一点微光');assert.equal(version.product.campaign.headline,'把微光，戴进日常');assert.equal(session.versions.length,4);
  assert.deepEqual(store.image(session,updated.id).bytes,editedBytes);
  editJob.status='completed';store.save(session);
- assert.equal(new Store(dir).get(session.id).versions.at(-1).renderSourceId,original.id);
+ assert.equal(new Store(dir).get(session.id).versions.at(-1).renderSourceId,version.id);
 });
 
 test('failed and cancelled model requests retain unknown usage instead of zero',async t=>{
@@ -169,6 +171,9 @@ test('product rendering accepts free direction and checks factual claims before 
  const points=Array.from({length:6},(_,i)=>'已知特点'+i);
  for(const scenario of [
   {name:'no mandatory saved plan'},
+  {name:'historical canvas does not constrain the new direction',historicalSize:'1536x1024'},
+  {name:'food direction without a forced format',direction:'家常热汤，用食材纹理、汤面光泽和自然热气表现鲜香与食欲，不加标题'},
+  {name:'jewelry direction without a forced luxury template',direction:'彩色日常饰品，用轻松佩戴与鲜活颜色表达年轻感，不要黑金或贵气布景'},
   {name:'a promotion can omit the headline',campaign:{offer:'¥99'},facts:[{basis:'user',text:'价格 ¥99'}]},
   {name:'custom scene and long headline',campaign:{headline:'长'.repeat(80),visual:'机械实验室中的微缩世界，环绕式文字'}},
   {name:'more than three grounded selling points',campaign:{sellingPoints:points},facts:points.map(text=>({basis:'user',text}))},
@@ -177,6 +182,7 @@ test('product rendering accepts free direction and checks factual claims before 
  ])await t.test(scenario.name,async t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'canvas-product-direction-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const store=new Store(dir),session=store.create(),skills=new Skills([path.resolve(import.meta.dirname,'../skills')],path.join(dir,'skills'));
+  if(scenario.historicalSize)session.size=scenario.historicalSize;
   const bytes=await sharp({create:{width:60,height:80,channels:3,background:'#abc'}}).png().toBuffer();
   store.addImage(session,bytes,{kind:'upload',demo:false});
   if(scenario.campaign||scenario.facts)updateProduct(session,{...(scenario.campaign?{campaign:scenario.campaign}:{}),...(scenario.facts?{facts:scenario.facts}:{})});
@@ -187,11 +193,13 @@ test('product rendering accepts free direction and checks factual claims before 
    if(new URL(url).pathname==='/v1/images/edits'){
     imageRequests++;const prompt=init.body.get('prompt');assert.match(prompt,/遵循用户描述的构图/);
     if(scenario.campaign?.visual)assert.ok(prompt.includes(scenario.campaign.visual));
+    if(scenario.direction)assert.ok(prompt.includes(scenario.direction));
+    assert.doesNotMatch(prompt,/目标画布|1080x1440/,'a default or historical session size must not silently dictate the format');
     return json({data:[{b64_json:bytes.toString('base64')}]});
    }
    const body=JSON.parse(init.body);let output;
    assert.ok(body.tools.every(tool=>tool.name!=='compose_product_poster'));
-   if(step++===0)output=[{id:'fc',type:'function_call',status:'completed',call_id:'call',name:'render_image',arguments:JSON.stringify({prompt:'遵循用户描述的构图，完整展示商品。'+(scenario.campaign?.visual||''),sourceId:session.selectedId,label:'商品图'})}];
+   if(step++===0)output=[{id:'fc',type:'function_call',status:'completed',call_id:'call',name:'render_image',arguments:JSON.stringify({prompt:'遵循用户描述的构图，完整展示商品。'+(scenario.direction||scenario.campaign?.visual||''),sourceId:session.selectedId,label:'商品图'})}];
    else{
     const result=JSON.parse(body.input.filter(item=>item.type==='function_call_output').at(-1).output);
     if(scenario.error)assert.match(result.error,scenario.error);else{assert.ok(result.id);assert.equal('editableCopy' in result,false);}
@@ -199,7 +207,7 @@ test('product rendering accepts free direction and checks factual claims before 
    }
    return json({id:'resp_'+step,object:'response',created_at:1,status:'completed',model:'chat-test',output,usage:{input_tokens:1,output_tokens:1,total_tokens:2}});
   });
-  const job={};await runAgent({session,skill:skills.get('product-promotion'),skills,store,config,runtime:createLiveRuntime(config),emit:()=>{},signal:new AbortController().signal,prompt:'制作商品图',job});
+  const job={};await runAgent({session,skill:skills.get('product-promotion'),skills,store,config,runtime:createLiveRuntime(config),emit:()=>{},signal:new AbortController().signal,prompt:scenario.direction||'制作商品图',job});
   assert.equal(imageRequests,scenario.error?0:1);assert.equal(job.imageCalls||0,imageRequests);assert.equal(session.versions.length,scenario.error?1:2);
   if(!scenario.error){assert.equal('poster' in session.versions.at(-1),false);assert.equal(session.versions.at(-1).width,60);assert.equal(session.versions.at(-1).height,80);assert.deepEqual(store.image(session,session.selectedId).bytes,bytes);}
  });

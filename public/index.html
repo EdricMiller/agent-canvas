@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f7f7f5"><title>画语 Canvas · 让想法成为画面</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/product.css"><link rel="stylesheet" href="/debug.css"><link rel="icon" href="/favicon.svg" type="image/svg+xml"></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f7f7f5"><title>画语 Canvas · 让想法成为画面</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/product.css"><link rel="stylesheet" href="/debug.css"><link rel="stylesheet" href="/references.css"><link rel="stylesheet" href="/workspace-tools.css"><link rel="icon" href="/favicon.svg" type="image/svg+xml"></head>
 <body>
 <div class="app-shell">
   <aside class="rail" aria-label="主导航">
@@ -16,7 +16,7 @@
   <div class="workspace">
     <header class="topbar">
       <div class="brand"><span>画语</span><span class="brand-en">Canvas</span><span class="top-divider"></span><span class="workspace-label">个人创作空间</span></div>
-      <div class="top-actions"><span class="connection" id="connection">连接中</span><button class="button subtle" id="debugButton" title="模型调试" aria-label="模型调试面板"></button><button class="button subtle" id="newSession"></button><button class="button dark" id="exportButton" disabled></button></div>
+      <div class="top-actions"><span class="connection" id="connection">连接中</span><button class="button subtle" id="debugButton" title="模型调试" aria-label="模型调试面板"></button><button class="button subtle" id="newSession"></button><button class="button design-entry" id="designButton" title="设置尺寸、添加文字和 Logo、管理设计版本" disabled>编辑设计稿</button><button class="button dark" id="exportButton" title="下载当前图片：PNG、JPG、RGB PDF 或 CMYK PDF" disabled></button></div>
     </header>
     <main>
       <section class="chat-panel" aria-label="对话创作">
@@ -26,6 +26,7 @@
         <div class="messages" id="messages" aria-live="polite"></div>
         <div class="composer-area">
           <div id="selectedContext" class="selected-context" hidden></div>
+          <div id="referenceContext" class="reference-context" aria-label="本轮参考图片" hidden></div>
           <form id="composer" class="composer">
             <textarea id="prompt" aria-label="描述你的创作想法" placeholder="描述你的想法，或告诉我如何调整图片…" rows="3" maxlength="12000"></textarea>
             <div class="composer-footer"><div class="composer-options"><button type="button" id="attachButton" class="icon-button" title="上传参考图片" aria-label="上传参考图片"></button><span class="composer-separator"></span><span class="size-auto-label">AI 自动构图</span></div><button type="submit" id="sendButton" class="send-button" aria-label="发送消息"></button><button type="button" id="stopButton" class="stop-button" hidden>停止</button></div>
@@ -39,7 +40,7 @@
           <div class="canvas-top-label"><span class="live-dot"></span>自由画布<span class="canvas-shortcut">拖入图片即可开始</span></div>
           <div class="empty-canvas" id="emptyCanvas">
             <div class="abstract-art" aria-hidden="true"><div class="art-card back"><span class="art-orbit"></span></div><div class="art-card front"><div class="art-sun"></div><div class="art-hill hill-one"></div><div class="art-hill hill-two"></div><div class="art-caption">a little imagination.</div></div><span class="art-star star-one">✳</span><span class="art-star star-two">✧</span></div>
-            <h2>让想象，有画面。</h2><p>在左侧描述你的想法，剩下的交给创作助手。<br>也可以上传一张图片，开始新的变化。</p><button class="button outlined" id="uploadButton"></button><span class="upload-caption">PNG、JPG、WebP · 最大 10 MB</span>
+            <h2>让想象，有画面。</h2><p>在左侧描述你的想法，剩下的交给创作助手。<br>也可以上传多张参考图，开始新的变化。</p><button class="button outlined" id="uploadButton"></button><span class="upload-caption">PNG、JPG、WebP · 每张最大 10 MB · 最多 8 张参考图</span>
           </div>
           <div class="image-stage" id="imageStage" hidden><div class="artboard" id="artboard"><img id="canvasImage" alt="当前选中的创作图片" draggable="false"></div></div>
           <div class="canvas-image-meta" id="imageMeta" hidden></div>
@@ -56,7 +57,20 @@
 <dialog id="settingsDialog"><div class="dialog-heading"><div><span class="eyebrow">CONNECTION</span><h2>创作引擎</h2></div><button class="icon-button close-dialog" aria-label="关闭">×</button></div><div id="settingsContent"></div></dialog>
 <dialog id="debugDialog" class="debug-dialog" aria-labelledby="debugTitle"><div class="dialog-heading"><div><span class="eyebrow">MODEL STUDIO</span><h2 id="debugTitle">模型调试</h2></div><button class="icon-button close-dialog" aria-label="关闭">×</button></div><p class="dialog-description">独立选择对话与生图的中转站和模型，也可以接入新的服务。</p><div class="debug-tabs" role="tablist" aria-label="调试设置"><button id="debugRoutesTab" role="tab" aria-controls="debugRoutes" aria-selected="true" data-debug-tab="routes">调用路由</button><button id="debugProvidersTab" role="tab" aria-controls="debugProviders" aria-selected="false" tabindex="-1" data-debug-tab="providers">中转站</button><button id="debugModelsTab" role="tab" aria-controls="debugModels" aria-selected="false" tabindex="-1" data-debug-tab="models">模型库</button></div><p id="debugNotice" class="debug-notice" role="status" hidden></p><p id="debugError" class="debug-error" role="alert" hidden></p><div id="debugContent"></div></dialog>
 <dialog id="compareDialog" class="compare-dialog"><div class="dialog-heading"><div><span class="eyebrow">PRODUCT COMPARISON</span><h2>原图与成品对照</h2></div><button class="icon-button close-dialog" aria-label="关闭">×</button></div><div class="comparison-grid"><figure><img id="compareOriginal" alt="商品原图"><figcaption id="compareOriginalLabel"></figcaption></figure><figure><img id="compareResult" alt="待核对的商品成品"><figcaption id="compareResultLabel"></figcaption></figure></div></dialog>
+<dialog id="downloadDialog" class="download-dialog" aria-labelledby="downloadTitle">
+  <div class="dialog-heading"><div><span class="eyebrow">DOWNLOAD ARTWORK</span><h2 id="downloadTitle">下载当前作品</h2></div><button class="icon-button close-dialog" aria-label="关闭下载面板">×</button></div>
+  <div class="download-source"><img id="downloadThumbnail" alt="待下载的作品"><div><strong id="downloadSourceName"></strong><p id="downloadSourceSize"></p></div></div>
+  <form id="downloadForm">
+    <div class="download-fields"><label>文件格式<select id="downloadFormat"><option value="png">PNG 图片</option><option value="jpeg">JPG 图片</option><option value="pdf">PDF 文档</option></select></label><label>色彩模式<select id="downloadColor"><option value="rgb">RGB · 屏幕与分享</option><option value="cmyk">CMYK · 印刷</option></select></label></div>
+    <p class="download-help">选择 PDF 可使用 CMYK；PNG/JPG 使用 RGB。</p>
+    <fieldset id="downloadPage" hidden><legend>PDF 页面尺寸</legend><div class="download-fields download-dimensions"><label>宽度<input id="downloadWidth" type="number" min="0.1" max="20000" step="any" required></label><label>高度<input id="downloadHeight" type="number" min="0.1" max="20000" step="any" required></label><label>单位<select id="downloadUnit"><option value="px">像素 px</option><option value="mm">毫米 mm</option></select></label></div><p class="download-help">自定义尺寸，图片等比完整放入页面。尺寸比例不同时会留白。</p></fieldset>
+    <label id="downloadScaleField">图片尺寸<select id="downloadScale"><option value="1">原始尺寸 · 1×</option><option value="2">2×</option><option value="3">3×</option></select></label>
+    <p id="downloadQuality" class="download-help"></p><p id="downloadProfile" class="download-help" hidden></p>
+    <p id="downloadError" class="download-error" role="alert" hidden></p>
+    <div class="download-footer"><span>要添加独立文字或 Logo，可使用顶部「编辑设计稿」。</span><button class="button dark" id="downloadSubmit" type="submit">下载文件</button></div>
+  </form>
+</dialog>
 
-<input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp" hidden><input type="file" id="skillInput" accept=".md,text/markdown" hidden><div id="toast" role="status" hidden></div>
+<input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp" multiple hidden><input type="file" id="skillInput" accept=".md,text/markdown" hidden><div id="toast" role="status" hidden></div>
 <script type="module" src="/app.js"></script>
 </body></html>

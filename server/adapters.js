@@ -22,11 +22,16 @@ export function listAdapters() {
 function compatibleAdapter(name,useResponses) {
   return {
     name,
-    createClient:provider=>new OpenAI({apiKey:provider.apiKey,baseURL:provider.baseURL||undefined,maxRetries:0,timeout:180000}),
+    // Compatible relays can take several minutes to finish a tool-planning
+    // response. Keep retries disabled, but let the turn-level timeout own the
+    // overall cancellation instead of aborting each request after 3 minutes.
+    createClient:provider=>new OpenAI({apiKey:provider.apiKey,baseURL:provider.baseURL||undefined,maxRetries:0,timeout:600000}),
     modelProvider:client=>new OpenAIProvider({openAIClient:client,useResponses}),
     generate:(client,args,options)=>client.images.generate(args,options),
     async edit(client,args,bytes,options) {
-      return client.images.edit({...args,image:await toFile(bytes,'source.png',{type:'image/png'})},options);
+      const inputs=Array.isArray(bytes)?bytes:[bytes];
+      const files=await Promise.all(inputs.map((input,index)=>toFile(input,`source-${index+1}.png`,{type:'image/png'})));
+      return client.images.edit({...args,image:files.length===1?files[0]:files},options);
     },
     async listModels(client,options) {
       const result=await client.models.list(options);

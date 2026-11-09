@@ -1,0 +1,97 @@
+import {chromium} from '@playwright/test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import sharp from 'sharp';
+import {PDFDocument,PDFName,PDFRawStream,decodePDFRawStream} from 'pdf-lib';
+import {createWebApp} from '../server/web.js';
+import {designFixture} from './fixtures/design.mjs';
+import {changePages} from '../shared/design-pages.js';
+import {getDefaultPrintProfile} from '../server/design/profiles.js';
+import {readAndRenderPdf,readPdfPages} from './helpers/pdf.mjs';
+
+const project=path.resolve(import.meta.dirname,'..'),root=process.env.CANVAS_TEST_BUILD_ROOT||project,temp=fs.mkdtempSync(path.join(os.tmpdir(),'canvas-print-ui-')),out=path.join(project,'test-results/print');fs.mkdirSync(out,{recursive:true});
+const instance=await createWebApp({root,dataDir:temp,demo:true,agentModel:'test',imageModel:'test',sandboxMode:'off'}),session=instance.store.create(),legacy=instance.store.create(),fixture=await designFixture();
+const ids=new Map();for(const [id,bytes] of fixture.assets){const v=instance.store.addImage(session,bytes,{kind:'upload',demo:false});ids.set(id,v.id);}
+for(const o of fixture.document.pages[0].objects)if(o.type==='image')o.assetId=ids.get(o.assetId);
+let document=fixture.document;for(let i=0;i<2;i++)document=changePages(document,{type:'duplicate',pageId:document.pages[0].id}).document;
+document.pages[1].objects.find(o=>o.type==='image'&&o.assetId===ids.get(fixture.photoId)).x=0;
+instance.documents.createFromDocument(session.id,document);const before=instance.documents.require(session.id);
+const nativeImage=await sharp({create:{width:1200,height:1800,channels:3,background:'#aeb8d8'}}).png().toBuffer();
+const oldImage=instance.store.addImage(legacy,await sharp(nativeImage).resize(120,180).png().toBuffer(),{kind:'generated',demo:false,width:120,height:180,label:'原始位图',adaptation:{method:'resize',sourceWidth:1200,sourceHeight:1800,upscaled:false,background:'#ffffff'}},{originalBytes:nativeImage});
+const server=await new Promise((resolve,reject)=>{const s=instance.app.listen(0,'127.0.0.1');s.once('listening',()=>resolve(s));s.once('error',reject);});
+const base=`http://127.0.0.1:${server.address().port}`;let browser;
+try{
+  browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH}:{})});
+  const page=await browser.newPage({viewport:{width:1600,height:1100}}),errors=[],serverErrors=[];page.on('pageerror',e=>errors.push(e.message));page.on('response',r=>{if(r.status()>=500)serverErrors.push(r.status()+' '+new URL(r.url()).pathname);});
+  async function assertActionsVisible(confirm=false){
+    for(const selector of ['#checkExport','#downloadSubmit',...(confirm?['#confirmPrintWarnings']:[])])assert.ok(await page.locator(selector).evaluate(el=>{const r=el.getBoundingClientRect(),top=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return r.top>=0&&r.bottom<=innerHeight&&r.left>=0&&r.right<=innerWidth&&(top===el||el.contains(top));}),selector+' must stay visible without scrolling');
+  }
+  await page.goto(base+'/?session='+session.id);await page.waitForFunction(()=>document.getElementById('designPreview')?.naturalWidth>0&&!document.getElementById('exportButton').disabled);
+  await page.locator('#exportButton').click();await page.locator('#printPreset').click();assert.equal(await page.locator('#downloadColor').inputValue(),'rgb');assert.equal(await page.locator('#printProfile').count(),0);
+  await page.locator('#checkExport').click();await page.getByRole('alert').filter({hasText:/低于所选 300 PPI/}).first().waitFor();assert.match(await page.getByLabel('下载检查结果').innerText(),/需要处理/);
+  await page.getByRole('button',{name:'普通 PDF',exact:true}).click();await page.locator('#downloadColor').selectOption('cmyk');await page.locator('#printBleed').fill('2.5');await page.locator('#printCropMarks').check();
+  assert.equal(await page.locator('#printProfile').inputValue(),'','do not silently select the technical ICC');
+  assert.equal(await page.locator('#checkExport').isDisabled(),true);assert.match(await page.locator('#exportStatus').innerText(),/尚未选择印刷 ICC/);
+  let cmykChecks=0;page.on('request',r=>{if(r.url().endsWith('/export-check')&&r.postDataJSON()?.colorSpace==='cmyk')cmykChecks++;});
+  await page.setViewportSize({width:390,height:844});await assertActionsVisible();await page.screenshot({path:path.join(out,'print-profile-required-mobile.png')});
+  const choosing=page.waitForEvent('filechooser');await page.locator('#downloadSubmit').click();await(await choosing).setFiles([]);assert.equal(cmykChecks,0,'missing ICC should open import, not convert colors');
+  await page.locator('#useRgbPdf').click();assert.equal(await page.locator('#downloadColor').inputValue(),'rgb');assert.match(await page.locator('#pdfColorHint').innerText(),/不进行 CMYK 转换/);
+  await page.setViewportSize({width:1600,height:1100});await page.getByRole('button',{name:'普通 PDF',exact:true}).click();await page.locator('#downloadColor').selectOption('cmyk');await page.locator('#printProfile').selectOption('default');
+  assert.match(await page.getByLabel('PDF 色彩设置').innerText(),/仅供技术测试/);assert.equal(await page.locator('#downloadSubmit').innerText(),'下载测试 PDF');
+  await assertActionsVisible();let downloads=0;page.on('download',()=>downloads++);
+  await page.locator('#downloadSubmit').click();await page.locator('#confirmPrintWarnings').waitFor();await assertActionsVisible(true);
+  assert.match(await page.getByLabel('下载检查结果').innerText(),/3 页/);assert.match(await page.getByLabel('下载检查结果').innerText(),/300 PPI/);assert.match(await page.getByLabel('下载检查结果').innerText(),/贴边/);
+  assert.equal(await page.locator('#downloadSubmit').isDisabled(),true);assert.match(await page.locator('#exportStatus').innerText(),/阅读检查结果并勾选确认/);assert.equal(downloads,0,'warnings must be reviewed');
+  await page.locator('#iccFileInput').setInputFiles({name:'无效.icc',mimeType:'application/octet-stream',buffer:Buffer.from('not an ICC')});await page.getByRole('alert').filter({hasText:/ICC/}).waitFor();assert.equal(await page.locator('#printBleed').inputValue(),'2.5');assert.equal(await page.locator('#printCropMarks').isChecked(),true);
+  const profile=await getDefaultPrintProfile();await page.locator('#iccFileInput').setInputFiles({name:'印刷方推荐.icc',mimeType:'application/octet-stream',buffer:profile.icc});
+  await page.waitForFunction(()=>document.querySelector('#printProfile')?.selectedOptions[0].textContent==='印刷方推荐'&&!document.getElementById('checkExport').disabled);
+  assert.match(await page.getByLabel('PDF 色彩设置').innerText(),/导入成功仅表示配置可用/);
+  await page.locator('#checkExport').click();await page.locator('#confirmPrintWarnings').check();assert.ok(!(await page.getByLabel('下载检查结果').innerText()).includes('内置技术验证配置'));
+  await page.screenshot({path:path.join(out,'print-dialog-desktop.png'),fullPage:true});
+  const downloading=page.waitForEvent('download');await page.locator('#downloadSubmit').click();const downloaded=await downloading;assert.match(downloaded.suggestedFilename(),/-r1-p1-2-3-cmyk.pdf$/);
+  const file=path.join(out,'print-cmyk.pdf');await downloaded.saveAs(file);const bytes=fs.readFileSync(file),pdf=await PDFDocument.load(bytes);assert.equal(pdf.getPageCount(),3);assert.ok(Math.abs(pdf.getPage(0).getTrimBox().width-180*72/25.4)<.001);assert.ok(Math.abs(pdf.getPage(0).getWidth()-201*72/25.4)<.001);
+  const texts=await readPdfPages(bytes);assert.ok(texts.every(text=>text.includes('让好想法')));const rendered=await readAndRenderPdf(bytes);fs.writeFileSync(path.join(out,'print-cmyk.png'),rendered.png);
+  assert.deepEqual(instance.documents.require(session.id),before,'checks and downloads leave the draft and snapshots unchanged');
+  await page.getByRole('button',{name:'线上图片',exact:true}).click();await page.locator('#downloadDpi').selectOption('300');const imageDownloading=page.waitForEvent('download');await page.locator('#downloadSubmit').click();const imageFile=path.join(out,'300ppi.png');await(await imageDownloading).saveAs(imageFile);const info=await sharp(imageFile).metadata();assert.equal(info.width,2126);assert.equal(info.height,2835);assert.equal(info.density,300);
+  await page.locator('#printPreset').click();await page.setViewportSize({width:390,height:844});await assertActionsVisible();await page.screenshot({path:path.join(out,'print-dialog-mobile.png'),fullPage:true});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.getByRole('button',{name:'关闭',exact:true}).click();await page.setViewportSize({width:1440,height:1000});
+  await page.goto(base+'/?session='+legacy.id);await page.locator('#canvasImage').waitFor();await page.locator('#exportButton').click();await page.locator('#printPreset').click();
+  assert.equal(await page.locator('#downloadColor').inputValue(),'rgb');assert.equal(await page.locator('#printProfile').count(),0);assert.equal(await page.getByLabel('成品宽度',{exact:true}).count(),0);
+  assert.match(await page.locator('#printSizeHint').innerText(),/1200 × 1800 px/);assert.match(await page.locator('#printSizeHint').innerText(),/101.60 × 152.40 mm/);
+  await page.setViewportSize({width:390,height:844});await assertActionsVisible();await page.screenshot({path:path.join(out,'automatic-print-mobile.png')});
+  const nativeDownloading=page.waitForEvent('download');await page.locator('#downloadSubmit').click();const nativeFile=path.join(out,'automatic-native-print.pdf');await(await nativeDownloading).saveAs(nativeFile);
+  const nativePdf=await PDFDocument.load(fs.readFileSync(nativeFile));assert.ok(Math.abs(nativePdf.getPage(0).getWidth()-288)<.001);assert.ok(Math.abs(nativePdf.getPage(0).getHeight()-432)<.001);
+  const nativeStream=nativePdf.context.enumerateIndirectObjects().map(([,o])=>o).find(o=>o instanceof PDFRawStream&&o.dict.get(PDFName.of('Subtype'))?.toString()==='/Image'&&o.dict.get(PDFName.of('ColorSpace'))?.toString()==='/DeviceRGB');
+  assert.equal(nativeStream.dict.get(PDFName.of('Width')).asNumber(),1200);assert.equal(nativeStream.dict.get(PDFName.of('Height')).asNumber(),1800);
+  assert.deepEqual(Buffer.from(decodePDFRawStream(nativeStream).decode()),await sharp(nativeImage).removeAlpha().raw().toBuffer());
+  await page.locator('#customPrintSize').check();await page.getByLabel('成品宽度',{exact:true}).fill('203.2');await page.getByLabel('成品高度',{exact:true}).fill('304.8');
+  const beforeBlocked=downloads;await page.locator('#downloadSubmit').click();await page.getByRole('alert').filter({hasText:/2400 × 3600/}).waitFor();assert.equal(downloads,beforeBlocked,'do not deliver an enlarged low-resolution image as a print-ready PDF');
+  await page.locator('#customPrintSize').uncheck();await page.getByRole('button',{name:'普通 PDF',exact:true}).click();await page.locator('#downloadColor').selectOption('cmyk');
+  assert.equal(await page.locator('#printProfile').inputValue(),'','an arbitrary imported ICC should not be auto-selected');await page.locator('#printProfile').selectOption('default');
+  await page.getByLabel('成品宽度',{exact:true}).fill('130');await page.getByLabel('成品高度',{exact:true}).fill('190');await page.locator('#printBleed').fill('1');
+  await page.setViewportSize({width:390,height:844});await assertActionsVisible();await page.locator('#downloadSubmit').click();await page.locator('#confirmPrintWarnings').waitFor();await assertActionsVisible(true);
+  assert.equal(await page.locator('#downloadSubmit').isDisabled(),true);assert.match(await page.locator('#exportStatus').innerText(),/勾选确认/);
+  await page.screenshot({path:path.join(out,'bitmap-print-review-mobile.png'),fullPage:true});
+  await page.locator('#confirmPrintWarnings').check();const legacyDownloading=page.waitForEvent('download');await page.locator('#downloadSubmit').click();const legacyFile=path.join(out,'bitmap-print.pdf');await(await legacyDownloading).saveAs(legacyFile);
+  const bitmapPdf=await PDFDocument.load(fs.readFileSync(legacyFile));assert.ok(Math.abs(bitmapPdf.getPage(0).getTrimBox().width-130*72/25.4)<.001);assert.equal(instance.documents.get(legacy.id),null);assert.equal(legacy.versions.length,1);assert.equal(legacy.versions[0].id,oldImage.id);
+  await page.locator('#useRgbPdf').click();assert.equal(await page.locator('#confirmPrintWarnings').count(),0);await assertActionsVisible();
+  const rgbDownloading=page.waitForEvent('download');await page.locator('#downloadSubmit').click();const rgbFile=path.join(out,'bitmap-rgb.pdf');await(await rgbDownloading).saveAs(rgbFile);const rgbPdf=await PDFDocument.load(fs.readFileSync(rgbFile));assert.equal(rgbPdf.getPageCount(),1);
+  const originalRgb=await sharp(instance.store.image(legacy,oldImage.id).bytes).removeAlpha().raw().toBuffer();
+  const embeddedRgb=rgbPdf.context.enumerateIndirectObjects().map(([,o])=>o).find(o=>o instanceof PDFRawStream&&o.dict.get(PDFName.of('Subtype'))?.toString()==='/Image'&&o.dict.get(PDFName.of('ColorSpace'))?.toString()==='/DeviceRGB');
+  assert.ok(embeddedRgb);assert.deepEqual(Buffer.from(decodePDFRawStream(embeddedRgb).decode()),originalRgb,'RGB fallback must preserve original image pixels');
+  // Closing a long-running check and switching sessions must not redirect the download.
+  await page.getByRole('button',{name:'关闭',exact:true}).click();await page.setViewportSize({width:1440,height:1000});await page.goto(base+'/?session='+session.id);await page.waitForFunction(()=>document.getElementById('designPreview')?.naturalWidth>0);
+  await page.locator('#exportButton').click();await page.getByRole('button',{name:'普通 PDF',exact:true}).click();
+  let release,started;const gate=new Promise(resolve=>{release=resolve;}),checking=new Promise(resolve=>{started=resolve;});
+  await page.route('**/design/export-check',async route=>{started();await gate;await route.continue();});
+  await page.locator('#downloadSubmit').click();await checking;await page.getByRole('button',{name:'关闭',exact:true}).click();await page.locator('#newSession').click();
+  await page.waitForFunction(old=>new URL(location.href).searchParams.get('session')!==old,session.id);
+  const backgroundDownload=page.waitForEvent('download');release();const backgroundFile=path.join(out,'original-session-snapshot.pdf');await(await backgroundDownload).saveAs(backgroundFile);
+  assert.ok((await readPdfPages(fs.readFileSync(backgroundFile)))[0].includes('让好想法'));assert.notEqual(new URL(page.url()).searchParams.get('session'),session.id);
+  assert.deepEqual(instance.documents.require(session.id),before);await page.unroute('**/design/export-check');
+  assert.deepEqual(errors,[]);assert.deepEqual(serverErrors,[]);
+  console.log('PASS: automatic 300 PPI RGB print size, actual native source pixels/colors, insufficient detail blocks enlarged printing, no automatic technical/arbitrary ICC, explicit test-profile labeling, visible desktop/mobile actions, 3-page review, ICC import/recovery, CMYK verification, 300 PPI PNG, session switching during export.');
+}catch(error){await browser?.contexts()[0]?.pages()[0]?.screenshot({path:path.join(out,'failure.png'),fullPage:true}).catch(()=>{});console.error(error);process.exitCode=1;}
+finally{await browser?.close();await instance.shutdown();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));fs.rmSync(temp,{recursive:true,force:true});}
